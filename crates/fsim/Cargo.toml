@@ -1,0 +1,14 @@
+[package]
+name = "fsim"
+version = "0.1.0"
+edition = "2021"
+description = "Tick-accurate Factorio 2.1 circuit-network simulator for blueprints"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+flate2 = "1"
+gif = "0.13"
+png = "0.17"
+serde_json = { version = "1", features = ["preserve_order"] }

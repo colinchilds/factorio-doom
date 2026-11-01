@@ -1,0 +1,56 @@
+{
+ "baseline": {
+  "entities": 2,
+  "ticks": 300,
+  "wholeUpdate": 0.174875,
+  "controlBehaviorUpdate": 0.0,
+  "electricHeatFluidCircuitUpdate": 0.082542,
+  "entityUpdate": 0.001834,
+  "scriptUpdate": 0.000708
+ },
+ "lamps_160x100": {
+  "entities": 15952,
+  "ticks": 300,
+  "wholeUpdate": 0.399542,
+  "controlBehaviorUpdate": 0.20075,
+  "electricHeatFluidCircuitUpdate": 0.089,
+  "entityUpdate": 0.00225,
+  "scriptUpdate": 0.000833
+ },
+ "lookup16_160x100": {
+  "entities": 214,
+  "ticks": 300,
+  "wholeUpdate": 0.294875,
+  "controlBehaviorUpdate": 0.087875,
+  "electricHeatFluidCircuitUpdate": 0.095416,
+  "entityUpdate": 0.002083,
+  "scriptUpdate": 0.000875
+ },
+ "lookup64_160x100": {
+  "entities": 214,
+  "ticks": 300,
+  "wholeUpdate": 0.349958,
+  "controlBehaviorUpdate": 0.163792,
+  "electricHeatFluidCircuitUpdate": 0.09125,
+  "entityUpdate": 0.001999,
+  "scriptUpdate": 0.000791
+ },
+ "pixel_160x100": {
+  "entities": 16765,
+  "ticks": 300,
+  "wholeUpdate": 0.439375,
+  "controlBehaviorUpdate": 0.230625,
+  "electricHeatFluidCircuitUpdate": 0.090542,
+  "entityUpdate": 0.002624,
+  "scriptUpdate": 0.001167
+ },
+ "pixel_nolamps_160x100": {
+  "entities": 927,
+  "ticks": 300,
+  "wholeUpdate": 0.324834,
+  "controlBehaviorUpdate": 0.126667,
+  "electricHeatFluidCircuitUpdate": 0.097917,
+  "entityUpdate": 0.002208,
+  "scriptUpdate": 0.00075
+ }
+}

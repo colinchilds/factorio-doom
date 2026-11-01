@@ -1,0 +1,264 @@
+{
+ "blueprint": {
+  "item": "blueprint",
+  "label": "timing",
+  "entities": [
+   {
+    "entity_number": 1,
+    "name": "constant-combinator",
+    "position": {
+     "x": 0.5,
+     "y": 0.5
+    },
+    "control_behavior": {
+     "sections": {
+      "sections": [
+       {
+        "index": 1,
+        "filters": [
+         {
+          "index": 1,
+          "type": "virtual",
+          "name": "signal-A",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 1
+         }
+        ]
+       }
+      ]
+     }
+    }
+   },
+   {
+    "entity_number": 2,
+    "name": "arithmetic-combinator",
+    "position": {
+     "x": 1.5,
+     "y": 3
+    },
+    "control_behavior": {
+     "arithmetic_conditions": {
+      "operation": "*",
+      "output_signal": {
+       "type": "virtual",
+       "name": "signal-each"
+      },
+      "first_signal": {
+       "type": "virtual",
+       "name": "signal-each"
+      },
+      "second_constant": 2
+     }
+    }
+   },
+   {
+    "entity_number": 3,
+    "name": "arithmetic-combinator",
+    "position": {
+     "x": 2.5,
+     "y": 3
+    },
+    "control_behavior": {
+     "arithmetic_conditions": {
+      "operation": "+",
+      "output_signal": {
+       "type": "virtual",
+       "name": "signal-each"
+      },
+      "first_signal": {
+       "type": "virtual",
+       "name": "signal-each"
+      },
+      "second_constant": 1
+     }
+    }
+   },
+   {
+    "entity_number": 4,
+    "name": "arithmetic-combinator",
+    "position": {
+     "x": 3.5,
+     "y": 3
+    },
+    "control_behavior": {
+     "arithmetic_conditions": {
+      "operation": "*",
+      "output_signal": {
+       "type": "virtual",
+       "name": "signal-each"
+      },
+      "first_signal": {
+       "type": "virtual",
+       "name": "signal-each"
+      },
+      "second_constant": 10
+     }
+    }
+   },
+   {
+    "entity_number": 5,
+    "name": "constant-combinator",
+    "position": {
+     "x": 5.5,
+     "y": 0.5
+    },
+    "control_behavior": {
+     "sections": {
+      "sections": [
+       {
+        "index": 1,
+        "filters": [
+         {
+          "index": 1,
+          "type": "virtual",
+          "name": "signal-T",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 1
+         }
+        ]
+       }
+      ]
+     }
+    }
+   },
+   {
+    "entity_number": 6,
+    "name": "arithmetic-combinator",
+    "position": {
+     "x": 5.5,
+     "y": 3
+    },
+    "control_behavior": {
+     "arithmetic_conditions": {
+      "operation": "*",
+      "output_signal": {
+       "type": "virtual",
+       "name": "signal-each"
+      },
+      "first_signal": {
+       "type": "virtual",
+       "name": "signal-each"
+      },
+      "second_constant": 1
+     }
+    }
+   },
+   {
+    "entity_number": 7,
+    "name": "constant-combinator",
+    "position": {
+     "x": 7.5,
+     "y": 0.5
+    },
+    "control_behavior": {
+     "sections": {
+      "sections": [
+       {
+        "index": 1,
+        "filters": [
+         {
+          "index": 1,
+          "type": "virtual",
+          "name": "signal-T",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 1
+         }
+        ]
+       }
+      ]
+     }
+    }
+   },
+   {
+    "entity_number": 8,
+    "name": "decider-combinator",
+    "position": {
+     "x": 7.5,
+     "y": 3
+    },
+    "control_behavior": {
+     "decider_conditions": {
+      "conditions": [
+       {
+        "comparator": "<",
+        "first_signal": {
+         "type": "virtual",
+         "name": "signal-T"
+        },
+        "constant": 5
+       }
+      ],
+      "outputs": [
+       {
+        "signal": {
+         "type": "virtual",
+         "name": "signal-T"
+        }
+       }
+      ]
+     }
+    }
+   },
+   {
+    "entity_number": 9,
+    "name": "substation",
+    "position": {
+     "x": 2,
+     "y": 1
+    }
+   }
+  ],
+  "wires": [
+   [
+    1,
+    1,
+    2,
+    1
+   ],
+   [
+    2,
+    3,
+    3,
+    1
+   ],
+   [
+    3,
+    3,
+    4,
+    1
+   ],
+   [
+    5,
+    2,
+    6,
+    2
+   ],
+   [
+    6,
+    4,
+    6,
+    2
+   ],
+   [
+    7,
+    1,
+    8,
+    1
+   ],
+   [
+    8,
+    3,
+    8,
+    1
+   ]
+  ],
+  "version": 562954249895938
+ },
+ "fsim": {
+  "ticks": 14,
+  "doc": "Pipeline latency, feedback counter (integrator), and a resetting clock."
+ }
+}

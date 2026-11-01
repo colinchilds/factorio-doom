@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""Run blueprint cases in a real (windowless) Factorio and collect the dump.
+
+  python3 harness/run.py conformance/cases            # all *.json in a directory
+  python3 harness/run.py a.json b.json -o out.json
+  python3 harness/run.py --discover                    # export the field-discovery blueprint
+  python3 harness/run.py --bench 300 a.json b.json     # UPS: median ms/tick per blueprint
+
+Uses an isolated config and mod directory under harness/, so the user's saves and mods are
+never touched. Set FACTORIO to override the binary path.
+"""
+
+import argparse
+import json
+import os
+import pathlib
+import shutil
+import subprocess
+import sys
+import time
+
+HERE = pathlib.Path(__file__).resolve().parent
+ROOT = HERE.parent
+sys.path.insert(0, str(ROOT / "conformance"))
+from bp import encode  # noqa: E402
+
+DEFAULT_BIN = pathlib.Path.home() / "Library/Application Support/Steam/steamapps/common/Factorio/factorio.app/Contents/MacOS/factorio"
+INSTANCE = HERE / "instance"
+DATA = INSTANCE / "data"
+MODS = HERE / "mods"
+OUTPUT = DATA / "script-output" / "fsim"
+
+
+def lua_str(s):
+    return "[==[" + s + "]==]"
+
+
+def write_cases(cases, warmup, mode="run"):
+    lines = [f"return {{ mode = {lua_str(mode)}, warmup = {warmup}, cases = {{"]
+    for c in cases:
+        lines.append(f"  {{ name = {lua_str(c['name'])}, ticks = {c['ticks']}, bp = {lua_str(c['bp'])} }},")
+    lines.append("} }")
+    (MODS / "fsim-harness" / "cases.lua").write_text("\n".join(lines) + "\n")
+
+
+def factorio(binary, *args):
+    cmd = [str(binary), "-c", str(INSTANCE / "config.ini"), "--mod-directory", str(MODS), "--disable-audio", *args]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    log = res.stdout + res.stderr
+    if res.returncode != 0 or "Error" in log:
+        sys.stderr.write(log)
+        raise SystemExit(f"factorio failed: {' '.join(args)}")
+    return log
+
+
+def load_cases(paths):
+    files = []
+    for p in map(pathlib.Path, paths):
+        files += sorted(p.glob("*.json")) if p.is_dir() else [p]
+    cases = []
+    for f in files:
+        data = json.loads(f.read_text())
+        ticks = data.get("fsim", {}).get("ticks", 10)
+        bp = {k: v for k, v in data.items() if k != "fsim"}
+        cases.append({"name": f.stem, "ticks": ticks, "bp": encode(bp)})
+    return cases
+
+
+BENCH_COLUMNS = ["wholeUpdate", "controlBehaviorUpdate", "electricHeatFluidCircuitUpdate", "entityUpdate", "scriptUpdate"]
+
+
+def bench(binary, cases, warmup, measure):
+    """Run each case alone with --benchmark-verbose; median ms per tick after power-up."""
+    print(f"{'case':<28} {'entities':>8} " + " ".join(f"{c[:12]:>12}" for c in BENCH_COLUMNS) + "   (median ms/tick)")
+    results = {}
+    for c in cases:
+        write_cases([c], warmup, mode="bench")
+        shutil.rmtree(OUTPUT, ignore_errors=True)
+        save = DATA / "fsim-base.zip"
+        factorio(binary, "--create", str(save))
+        settle = 10
+        ticks = 1 + warmup + settle + measure
+        log = factorio(binary, "--benchmark", str(save), "--benchmark-ticks", str(ticks), "--benchmark-verbose", "all")
+        info = json.loads((OUTPUT / "bench.json").read_text())
+        t0 = info["t0"]
+        case_info = info["cases"][c["name"]]
+        if case_info["unpowered"]:
+            raise SystemExit(f"{c['name']}: {case_info['unpowered']} entities unpowered; timings meaningless")
+        header, rows = None, []
+        for line in log.splitlines():
+            if line.startswith("tick,"):
+                header = line.split(",")
+            elif header and line.startswith("t") and line[1:2].isdigit():
+                f = line.split(",")
+                if int(f[0][1:]) >= t0 + settle:
+                    rows.append(f)
+        idx = [header.index(col) for col in BENCH_COLUMNS]
+        med = []
+        for i in idx:
+            vals = sorted(int(r[i]) for r in rows)
+            med.append(vals[len(vals) // 2] / 1e6)
+        results[c["name"]] = {"entities": case_info["entities"], "ticks": len(rows),
+                              **{col: m for col, m in zip(BENCH_COLUMNS, med)}}
+        print(f"{c['name']:<28} {case_info['entities']:>8} " + " ".join(f"{m:>12.3f}" for m in med), flush=True)
+    return results
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("paths", nargs="*")
+    ap.add_argument("-o", "--out", default=str(HERE / "out" / "dump.json"))
+    ap.add_argument("--warmup", type=int, default=30, help="ticks between build and t=0 (power up)")
+    ap.add_argument("--discover", action="store_true", help="export a blueprint with every option set")
+    ap.add_argument("--signals", action="store_true", help="write the game's signal order to conformance/")
+    ap.add_argument("--bench", type=int, metavar="TICKS", help="time each blueprint alone for TICKS ticks")
+    args = ap.parse_args()
+    binary = pathlib.Path(os.environ.get("FACTORIO", DEFAULT_BIN))
+    DATA.mkdir(parents=True, exist_ok=True)
+
+    if args.bench:
+        results = bench(binary, load_cases(args.paths), args.warmup, args.bench)
+        if args.out != ap.get_default("out"):
+            pathlib.Path(args.out).write_text(json.dumps(results, indent=1))
+        return
+
+    if args.discover or args.signals:
+        write_cases([], 0, mode="discover" if args.discover else "signals")
+        ticks = 6
+    else:
+        cases = load_cases(args.paths)
+        if not cases:
+            raise SystemExit("no cases")
+        write_cases(cases, args.warmup)
+        ticks = 1 + args.warmup + max(c["ticks"] for c in cases) + 3
+
+    DATA.mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(OUTPUT, ignore_errors=True)
+    save = DATA / "fsim-base.zip"
+    start = time.time()
+    factorio(binary, "--create", str(save))
+    log = factorio(binary, "--benchmark", str(save), "--benchmark-ticks", str(ticks))
+    elapsed = time.time() - start
+
+    if args.discover:
+        print((OUTPUT / "discover.txt").read_text())
+        return
+    if args.signals:
+        sigs = json.loads((OUTPUT / "signals.json").read_text())
+        dest = ROOT / "conformance" / "signal_order.json"
+        dest.write_text("[\n" + ",\n".join(json.dumps(x) for x in sigs) + "\n]\n")
+        print(f"{len(sigs)} signals -> {dest}")
+        return
+    dump = OUTPUT / "dump.json"
+    if not dump.exists():
+        sys.stderr.write(log)
+        raise SystemExit("no dump written")
+    out = pathlib.Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(dump, out)
+    print(f"{len(cases)} cases, {ticks} ticks in {elapsed:.1f}s -> {out}")
+
+
+if __name__ == "__main__":
+    main()

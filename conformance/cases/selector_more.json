@@ -1,0 +1,596 @@
+{
+ "blueprint": {
+  "item": "blueprint",
+  "label": "selector_more",
+  "entities": [
+   {
+    "entity_number": 1,
+    "name": "constant-combinator",
+    "position": {
+     "x": 0.5,
+     "y": 0.5
+    },
+    "control_behavior": {
+     "sections": {
+      "sections": [
+       {
+        "index": 1,
+        "filters": [
+         {
+          "index": 1,
+          "type": "virtual",
+          "name": "signal-A",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 5
+         },
+         {
+          "index": 2,
+          "type": "virtual",
+          "name": "signal-B",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 5
+         },
+         {
+          "index": 3,
+          "type": "virtual",
+          "name": "signal-C",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 9
+         },
+         {
+          "index": 4,
+          "name": "iron-plate",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 5
+         },
+         {
+          "index": 5,
+          "type": "virtual",
+          "name": "signal-D",
+          "quality": "normal",
+          "comparator": "=",
+          "count": -2
+         }
+        ]
+       }
+      ]
+     }
+    }
+   },
+   {
+    "entity_number": 2,
+    "name": "selector-combinator",
+    "position": {
+     "x": 0.5,
+     "y": 3
+    },
+    "control_behavior": {
+     "operation": "select",
+     "select_max": false,
+     "index_constant": 0
+    }
+   },
+   {
+    "entity_number": 3,
+    "name": "selector-combinator",
+    "position": {
+     "x": 1.5,
+     "y": 3
+    },
+    "control_behavior": {
+     "operation": "select",
+     "select_max": false,
+     "index_constant": 1
+    }
+   },
+   {
+    "entity_number": 4,
+    "name": "selector-combinator",
+    "position": {
+     "x": 2.5,
+     "y": 3
+    },
+    "control_behavior": {
+     "operation": "select",
+     "select_max": false,
+     "index_constant": 2
+    }
+   },
+   {
+    "entity_number": 5,
+    "name": "selector-combinator",
+    "position": {
+     "x": 3.5,
+     "y": 3
+    },
+    "control_behavior": {
+     "operation": "select",
+     "select_max": false,
+     "index_constant": 3
+    }
+   },
+   {
+    "entity_number": 6,
+    "name": "selector-combinator",
+    "position": {
+     "x": 5.5,
+     "y": 3
+    },
+    "control_behavior": {
+     "operation": "select",
+     "select_max": true,
+     "index_signal": {
+      "type": "virtual",
+      "name": "signal-I"
+     }
+    }
+   },
+   {
+    "entity_number": 7,
+    "name": "constant-combinator",
+    "position": {
+     "x": 5.5,
+     "y": 0.5
+    },
+    "control_behavior": {
+     "sections": {
+      "sections": [
+       {
+        "index": 1,
+        "filters": [
+         {
+          "index": 1,
+          "type": "virtual",
+          "name": "signal-A",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 5
+         },
+         {
+          "index": 2,
+          "type": "virtual",
+          "name": "signal-B",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 5
+         },
+         {
+          "index": 3,
+          "type": "virtual",
+          "name": "signal-C",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 9
+         },
+         {
+          "index": 4,
+          "name": "iron-plate",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 5
+         },
+         {
+          "index": 5,
+          "type": "virtual",
+          "name": "signal-D",
+          "quality": "normal",
+          "comparator": "=",
+          "count": -2
+         }
+        ]
+       }
+      ]
+     }
+    }
+   },
+   {
+    "entity_number": 8,
+    "name": "constant-combinator",
+    "position": {
+     "x": 6.5,
+     "y": 0.5
+    },
+    "control_behavior": {
+     "sections": {
+      "sections": [
+       {
+        "index": 1,
+        "filters": [
+         {
+          "index": 1,
+          "type": "virtual",
+          "name": "signal-I",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 1
+         }
+        ]
+       }
+      ]
+     }
+    }
+   },
+   {
+    "entity_number": 9,
+    "name": "selector-combinator",
+    "position": {
+     "x": 7.5,
+     "y": 3
+    },
+    "control_behavior": {
+     "operation": "select",
+     "select_max": true,
+     "index_signal": {
+      "type": "virtual",
+      "name": "signal-I"
+     }
+    }
+   },
+   {
+    "entity_number": 10,
+    "name": "constant-combinator",
+    "position": {
+     "x": 7.5,
+     "y": 0.5
+    },
+    "control_behavior": {
+     "sections": {
+      "sections": [
+       {
+        "index": 1,
+        "filters": [
+         {
+          "index": 1,
+          "type": "virtual",
+          "name": "signal-A",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 5
+         },
+         {
+          "index": 2,
+          "type": "virtual",
+          "name": "signal-B",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 5
+         },
+         {
+          "index": 3,
+          "type": "virtual",
+          "name": "signal-C",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 9
+         },
+         {
+          "index": 4,
+          "name": "iron-plate",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 5
+         },
+         {
+          "index": 5,
+          "type": "virtual",
+          "name": "signal-D",
+          "quality": "normal",
+          "comparator": "=",
+          "count": -2
+         }
+        ]
+       }
+      ]
+     }
+    }
+   },
+   {
+    "entity_number": 11,
+    "name": "constant-combinator",
+    "position": {
+     "x": 8.5,
+     "y": 0.5
+    },
+    "control_behavior": {
+     "sections": {
+      "sections": [
+       {
+        "index": 1,
+        "filters": [
+         {
+          "index": 1,
+          "type": "virtual",
+          "name": "signal-I",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 1
+         }
+        ]
+       }
+      ]
+     }
+    }
+   },
+   {
+    "entity_number": 12,
+    "name": "selector-combinator",
+    "position": {
+     "x": 9.5,
+     "y": 3
+    },
+    "control_behavior": {
+     "operation": "select",
+     "select_max": true,
+     "index_signal": {
+      "type": "virtual",
+      "name": "signal-I"
+     }
+    }
+   },
+   {
+    "entity_number": 13,
+    "name": "constant-combinator",
+    "position": {
+     "x": 9.5,
+     "y": 0.5
+    },
+    "control_behavior": {
+     "sections": {
+      "sections": [
+       {
+        "index": 1,
+        "filters": [
+         {
+          "index": 1,
+          "type": "virtual",
+          "name": "signal-A",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 5
+         },
+         {
+          "index": 2,
+          "type": "virtual",
+          "name": "signal-B",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 5
+         },
+         {
+          "index": 3,
+          "type": "virtual",
+          "name": "signal-C",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 9
+         },
+         {
+          "index": 4,
+          "name": "iron-plate",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 5
+         },
+         {
+          "index": 5,
+          "type": "virtual",
+          "name": "signal-D",
+          "quality": "normal",
+          "comparator": "=",
+          "count": -2
+         }
+        ]
+       }
+      ]
+     }
+    }
+   },
+   {
+    "entity_number": 14,
+    "name": "selector-combinator",
+    "position": {
+     "x": 11.5,
+     "y": 3
+    },
+    "control_behavior": {
+     "operation": "select",
+     "select_max": true,
+     "index_signal": {
+      "type": "virtual",
+      "name": "signal-I"
+     }
+    }
+   },
+   {
+    "entity_number": 15,
+    "name": "constant-combinator",
+    "position": {
+     "x": 11.5,
+     "y": 0.5
+    },
+    "control_behavior": {
+     "sections": {
+      "sections": [
+       {
+        "index": 1,
+        "filters": [
+         {
+          "index": 1,
+          "type": "virtual",
+          "name": "signal-A",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 5
+         },
+         {
+          "index": 2,
+          "type": "virtual",
+          "name": "signal-B",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 5
+         },
+         {
+          "index": 3,
+          "type": "virtual",
+          "name": "signal-C",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 9
+         },
+         {
+          "index": 4,
+          "name": "iron-plate",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 5
+         },
+         {
+          "index": 5,
+          "type": "virtual",
+          "name": "signal-D",
+          "quality": "normal",
+          "comparator": "=",
+          "count": -2
+         }
+        ]
+       }
+      ]
+     }
+    }
+   },
+   {
+    "entity_number": 16,
+    "name": "selector-combinator",
+    "position": {
+     "x": 13.5,
+     "y": 3
+    },
+    "control_behavior": {
+     "operation": "select",
+     "select_max": true,
+     "index_signal": {
+      "type": "virtual",
+      "name": "signal-D"
+     }
+    }
+   },
+   {
+    "entity_number": 17,
+    "name": "selector-combinator",
+    "position": {
+     "x": 14.5,
+     "y": 3
+    },
+    "control_behavior": {
+     "operation": "select",
+     "select_max": true,
+     "index_signal": {
+      "type": "virtual",
+      "name": "signal-I"
+     },
+     "index_constant": 1
+    }
+   },
+   {
+    "entity_number": 18,
+    "name": "substation",
+    "position": {
+     "x": 2,
+     "y": 1
+    }
+   },
+   {
+    "entity_number": 19,
+    "name": "substation",
+    "position": {
+     "x": 13,
+     "y": 1
+    }
+   }
+  ],
+  "wires": [
+   [
+    1,
+    1,
+    2,
+    1
+   ],
+   [
+    2,
+    1,
+    3,
+    1
+   ],
+   [
+    3,
+    1,
+    4,
+    1
+   ],
+   [
+    4,
+    1,
+    5,
+    1
+   ],
+   [
+    7,
+    1,
+    6,
+    1
+   ],
+   [
+    8,
+    2,
+    6,
+    2
+   ],
+   [
+    10,
+    1,
+    9,
+    1
+   ],
+   [
+    11,
+    1,
+    9,
+    1
+   ],
+   [
+    13,
+    1,
+    12,
+    1
+   ],
+   [
+    15,
+    1,
+    14,
+    1
+   ],
+   [
+    1,
+    1,
+    16,
+    1
+   ],
+   [
+    1,
+    1,
+    17,
+    1
+   ]
+  ],
+  "version": 562954249895938
+ },
+ "fsim": {
+  "ticks": 5,
+  "doc": "Index taken from a signal (several placements), tie order when selecting the minimum."
+ }
+}

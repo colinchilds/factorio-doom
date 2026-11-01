@@ -1,0 +1,74 @@
+{
+ "baseline": {
+  "entities": 2,
+  "ticks": 300,
+  "wholeUpdate": 0.174792,
+  "controlBehaviorUpdate": 0.0,
+  "electricHeatFluidCircuitUpdate": 0.082292,
+  "entityUpdate": 0.00175,
+  "scriptUpdate": 0.000709
+ },
+ "lookup256_160x100": {
+  "entities": 214,
+  "ticks": 300,
+  "wholeUpdate": 0.705375,
+  "controlBehaviorUpdate": 0.504041,
+  "electricHeatFluidCircuitUpdate": 0.092459,
+  "entityUpdate": 0.002,
+  "scriptUpdate": 0.000792
+ },
+ "lamps_320x200": {
+  "entities": 63576,
+  "ticks": 300,
+  "wholeUpdate": 0.84675,
+  "controlBehaviorUpdate": 0.627209,
+  "electricHeatFluidCircuitUpdate": 0.088709,
+  "entityUpdate": 0.003709,
+  "scriptUpdate": 0.001625
+ },
+ "lookup16_320x200": {
+  "entities": 424,
+  "ticks": 300,
+  "wholeUpdate": 0.403583,
+  "controlBehaviorUpdate": 0.19125,
+  "electricHeatFluidCircuitUpdate": 0.099917,
+  "entityUpdate": 0.002251,
+  "scriptUpdate": 0.000834
+ },
+ "lookup256_320x200": {
+  "entities": 424,
+  "ticks": 300,
+  "wholeUpdate": 1.810292,
+  "controlBehaviorUpdate": 1.592333,
+  "electricHeatFluidCircuitUpdate": 0.099334,
+  "entityUpdate": 0.002416,
+  "scriptUpdate": 0.000834
+ },
+ "lookup64_320x200": {
+  "entities": 424,
+  "ticks": 300,
+  "wholeUpdate": 0.694417,
+  "controlBehaviorUpdate": 0.507541,
+  "electricHeatFluidCircuitUpdate": 0.093875,
+  "entityUpdate": 0.002168,
+  "scriptUpdate": 0.000792
+ },
+ "pixel_320x200": {
+  "entities": 65199,
+  "ticks": 300,
+  "wholeUpdate": 0.980958,
+  "controlBehaviorUpdate": 0.706625,
+  "electricHeatFluidCircuitUpdate": 0.133833,
+  "entityUpdate": 0.004333,
+  "scriptUpdate": 0.002042
+ },
+ "pixel_nolamps_320x200": {
+  "entities": 1847,
+  "ticks": 300,
+  "wholeUpdate": 0.497291,
+  "controlBehaviorUpdate": 0.271333,
+  "electricHeatFluidCircuitUpdate": 0.119333,
+  "entityUpdate": 0.002418,
+  "scriptUpdate": 0.000792
+ }
+}

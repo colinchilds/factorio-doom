@@ -1,0 +1,8 @@
+target/
+harness/instance/data/
+harness/out/
+__pycache__/
+.venv/
+.idea/
+bench/gen/
+harness/mods/fsim-harness/cases.lua
