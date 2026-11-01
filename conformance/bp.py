@@ -95,8 +95,9 @@ class Blueprint:
     def selector(self, tx, ty, **params):
         return self._add("selector-combinator", tx + 0.5, ty + 1, dict(params))
 
-    def lamp(self, tx, ty, cb=None):
-        return self._add("small-lamp", tx + 0.5, ty + 0.5, cb)
+    def lamp(self, tx, ty, cb=None, always_on=False):
+        """always_on: lit in daylight too (otherwise lamps only light up at night)."""
+        return self._add("small-lamp", tx + 0.5, ty + 0.5, cb, **({"always_on": True} if always_on else {}))
 
     def pole(self, tx, ty):
         return self._add("medium-electric-pole", tx + 0.5, ty + 0.5)
@@ -151,6 +152,28 @@ class Blueprint:
             occ |= {(x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1)}
             # Supply area: 18x18 centered on (x + 1, y + 1), i.e. tiles x-8 .. x+9.
             targets = {(a, b) for a, b in targets if not (x - 8 <= a <= x + 9 and y - 8 <= b <= y + 9)}
+
+    def link_power(self, reach=18):
+        """Copper-wire the substations into one electric network (a minimum spanning tree over
+        center distances). Blueprints only carry the wires they list, so without this every
+        substation is its own island when the user pastes the blueprint."""
+        subs = [e for e in self.entities if e["name"] == "substation"]
+        if not subs:
+            return
+        pos = lambda e: (e["position"]["x"], e["position"]["y"])
+        d2 = lambda a, b: (pos(a)[0] - pos(b)[0]) ** 2 + (pos(a)[1] - pos(b)[1]) ** 2
+        best = {id(e): (d2(subs[0], e), subs[0]) for e in subs[1:]}
+        left = {id(e): e for e in subs[1:]}
+        while left:
+            k = min(left, key=lambda k: best[k][0])
+            e = left.pop(k)
+            dist, near = best[k]
+            if dist > reach * reach:
+                raise ValueError(f"substation at {pos(e)} is {dist ** 0.5:.1f} tiles from the nearest one (max {reach})")
+            self.wire(near["entity_number"], COPPER, e["entity_number"], COPPER)
+            for k2, e2 in left.items():
+                if d2(e, e2) < best[k2][0]:
+                    best[k2] = (d2(e, e2), e)
 
     def to_json(self):
         return {"blueprint": {"item": "blueprint", "label": self.label, "entities": self.entities,

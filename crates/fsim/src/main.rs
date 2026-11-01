@@ -29,6 +29,9 @@ enum Cmd {
         /// Write lamp frames as PNGs into this directory.
         #[arg(long)]
         frames: Option<PathBuf>,
+        /// Write lamp frames as raw PPM files (one pixel per lamp tile, for scripts) into this directory.
+        #[arg(long)]
+        ppm: Option<PathBuf>,
         /// Write lamp frames as an animated GIF.
         #[arg(long)]
         gif: Option<PathBuf>,
@@ -86,7 +89,7 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
-        Cmd::Run { blueprint, ticks, start_tick, frames, gif, every, scale, probes, nets } => {
+        Cmd::Run { blueprint, ticks, start_tick, frames, ppm, gif, every, scale, probes, nets } => {
             let m = model::parse(&model::load_file(&blueprint)?)?;
             for w in &m.warnings {
                 eprintln!("warning: {w}");
@@ -103,10 +106,10 @@ fn main() -> Result<()> {
             let probe_idx: Vec<(u32, usize)> =
                 probes.iter().filter_map(|&n| sim.model.entity_index(n).map(|i| (n, i))).collect();
             let grid = LampGrid::new(&sim);
-            if (frames.is_some() || gif.is_some()) && grid.is_none() {
+            if (frames.is_some() || gif.is_some() || ppm.is_some()) && grid.is_none() {
                 bail!("blueprint has no lamps to render");
             }
-            if let Some(dir) = &frames {
+            for dir in frames.iter().chain(ppm.iter()) {
                 std::fs::create_dir_all(dir)?;
             }
             let mut gif_out = match (&gif, &grid) {
@@ -140,6 +143,11 @@ fn main() -> Result<()> {
                 }
                 if t % every == 0 {
                     if let Some(g) = &grid {
+                        if let Some(dir) = &ppm {
+                            let mut data = format!("P6\n{} {}\n255\n", g.width, g.height).into_bytes();
+                            data.extend_from_slice(&g.frame(&sim));
+                            std::fs::write(dir.join(format!("{t:05}.ppm")), data)?;
+                        }
                         if frames.is_some() || gif_out.is_some() {
                             let img = upscale(&g.frame(&sim), g.width, g.height, scale);
                             if let Some(dir) = &frames {

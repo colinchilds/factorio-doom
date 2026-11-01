@@ -15,8 +15,10 @@ is what makes this look feasible now.
 - **Screen size is a build parameter.** The generator takes the size (e.g. `--size 160x100`)
   and produces a working blueprint for it, so players pick their resolution. Everything has to
   derive from W and H; see "Screen size" below.
-- **Original content only**: our own maps, sprites and name. Don't recreate id Software's levels
-  or art.
+- **Original or freely licensed content only**: our own maps and name. Sprites and textures come
+  from [Freedoom](https://freedoom.github.io/) (BSD, original art; see `assets/freedoom/`). Don't
+  use or recreate id Software's levels or art; the user asked for "real Doom sprites" and agreed
+  to Freedoom's instead.
 - **Related project:** the user's `../giftorio` (Rust/WASM) turns GIFs into lamp-display
   blueprints. Each pixel is one signal and each lamp reads packed RGB. Reuse its blueprint and
   lamp ideas.
@@ -42,6 +44,12 @@ is what makes this look feasible now.
     copies scalar R onto all of them.
   - *Per-lane lookup ("gather"):* bit-sliced lookup deciders, one per output bit, each an OR of
     the keys with that bit set and outputting `Each = 2^b`. Or one decider per output value.
+- **Lane signals for generated blueprints come from `conformance/lane_signals.json`** (694 of
+  them), never straight from the signal order. That list is item, fluid, recipe and entity
+  signals that exist and aren't hidden or parameter signals in *both* vanilla and Space Age
+  (`harness/run.py --lanes`). The user plays with Space Age. The first pasted demo failed to
+  import because `satellite` doesn't exist there, and `parameter-N` signals would make a
+  blueprint parametrised.
 - **Lane budget:** 2,878 lanes in vanilla (1,439 signals × 2 qualities, measured in game; order
   in `conformance/signal_order.json`). Space Age would add more, but the signal order file would
   have to be regenerated with DLC enabled.
@@ -202,6 +210,34 @@ The game is the referee, and fsim is the fast development loop:
 5. **Benchmarks** (`bench/m0.py`): synthetic row-stage blueprints at any W×H, written to
    `bench/gen/` (gitignored, up to 13 MB each).
 
+### Sprite demo (`demos/sprite.py`, 2026-11-01)
+
+The first real renderer piece: a Freedoom monster walking toward and away from the camera, at
+any `--size`. It proves the texture path planned above:
+- **Scalar pipeline:** each stage reads the previous network and passes all of it through
+  (`Each + 0`), so every scalar on a network comes from the same clock tick. This removes the
+  need for hand-placed delays.
+- **Column stage** (lanes = columns): `u = ((c+1)*step + O) >> 16`, where the offset `O` adds
+  2^30 + frame·2^28. That keeps every lane nonzero (a zero lane vanishes) and makes the lookup key
+  `16384 + 4096·frame + u` in one shift.
+- **Lookup:** bit-sliced deciders, one per (strip word, bit), each an OR over the keys with that
+  bit set, outputting `Each = 2^b`. Bit 31 uses the constant -2^31; this works in the game.
+- **Row stage:** sprite rows share one `v` per screen row. So a row-lane vector computes
+  `J = (v >> 3) + 2048` and `S = (v & 7) * 4`, and each row picks its word with deciders
+  `row_y = 2048 + j → Everything(green bus j)`. It then shifts by `row_y` from the red wire,
+  masks 15, and maps the palette with 16 deciders on `Each(both)`. A green constant of 16 on every
+  column lane makes transparent texels exist as key 16, which maps to the row's floor/ceiling
+  color.
+- **Size:** about 26 combinators per row, plus a lookup block of up to 8×32 deciders. 160×100 is
+  18.8k entities.
+- **Checks:**
+  - `--verify` compares every fsim frame with a Python reference using the same integer math. It
+    has 0 differing frames at 64×40, 160×100 and 320×200 (latency 21 ticks).
+  - The 64×40 version matches the game on 233,935 checks.
+  - 160×100 and 320×200 import and run in a Space Age game at 0.43 and 1.23 ms/tick.
+  - Generated files go to `demos/gen/` (gitignored). The `.txt` file is the blueprint string to
+    paste.
+
 ## Status (2026-11-01)
 
 Done:
@@ -211,8 +247,10 @@ Done:
 - Measured semantics: see the README table, and `sim.rs` / `conform.rs` doc comments for the
   timing model.
 - Screen size decided (160×100, aiming for 320×200), and M0 UPS measurements: 320×200 fits.
+- Freedoom sprite assets and the sprite demo (above): the texture path works end to end in fsim
+  at three sizes and in the game.
 
-**Nothing is committed yet** (the repo was `git init`'d). Commit only when the user asks.
+Commit only when the user asks.
 
 ## Next steps (in order)
 
@@ -243,6 +281,13 @@ Done:
 - When a game result looks wrong, check power and wiring before concluding anything about
   semantics. Two "semantics" puzzles so far were really an unpowered entity and an over-long
   wire.
+- **Blueprints for the user must power themselves:** `b.power()` places the substations, then
+  `b.link_power()` copper-wires them (pasted blueprints only carry the wires they list). The
+  harness then adds a single power source, so a missing link shows up as unpowered entities.
+  Before handing a blueprint over, run `harness/run.py --dlc --bench 30 file.json`: it builds it
+  in a Space Age game and fails on import errors or unpowered entities.
+- **Screen lamps need `always_on`** (`b.lamp(..., always_on=True)`), or they stay dark in
+  daylight. The harness runs at night, so it can't catch this.
 - Python is stdlib only. Game paths come from `FACTORIO` and the Steam default in
   `harness/run.py`. Harness runs take about 2 s.
 - The harness mod list disables space-age/quality/elevated-rails, so signals and the signal

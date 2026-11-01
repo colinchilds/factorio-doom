@@ -5,12 +5,15 @@
   python3 harness/run.py a.json b.json -o out.json
   python3 harness/run.py --discover                    # export the field-discovery blueprint
   python3 harness/run.py --bench 300 a.json b.json     # UPS: median ms/tick per blueprint
+  python3 harness/run.py --dlc --bench 30 a.json       # same, in a Space Age game (import check)
+  python3 harness/run.py --lanes                       # signals safe to use as lanes, with/without DLC
 
 Uses an isolated config and mod directory under harness/, so the user's saves and mods are
 never touched. Set FACTORIO to override the binary path.
 """
 
 import argparse
+import contextlib
 import json
 import os
 import pathlib
@@ -51,6 +54,53 @@ def factorio(binary, *args):
         sys.stderr.write(log)
         raise SystemExit(f"factorio failed: {' '.join(args)}")
     return log
+
+
+@contextlib.contextmanager
+def dlc_mods(enabled):
+    """Temporarily enable every mod in the harness mod list (space-age, quality, elevated-rails)."""
+    mod_list = MODS / "mod-list.json"
+    original = mod_list.read_text()
+    try:
+        if enabled:
+            ml = json.loads(original)
+            for m in ml["mods"]:
+                m["enabled"] = True
+            mod_list.write_text(json.dumps(ml, indent=2))
+        yield
+    finally:
+        mod_list.write_text(original)
+
+
+def survey(binary, dlc):
+    """Run lanes.lua with the DLC mods on or off; returns {(type, name): flags}."""
+    with dlc_mods(dlc):
+        write_cases([], 0, mode="lanes")
+        shutil.rmtree(OUTPUT, ignore_errors=True)
+        save = DATA / "fsim-lanes.zip"
+        factorio(binary, "--create", str(save))
+        factorio(binary, "--benchmark", str(save), "--benchmark-ticks", "3")
+    return {(x["type"], x["name"]): x for x in json.loads((OUTPUT / "lanes.json").read_text())}
+
+
+def lanes(binary):
+    """Lane signals for generated blueprints: not virtual (those are kept for named scalars), not
+    hidden or parameter signals in either game, and present in both vanilla and Space Age. Kept
+    in vanilla signal order."""
+    vanilla, dlc = survey(binary, False), survey(binary, True)
+    order = json.loads((ROOT / "conformance" / "signal_order.json").read_text())
+    bad = lambda f: f["hidden"] or f["parameter"] or f["special"]
+    out, dropped = [], []
+    for t, name, q in order:
+        if q != "normal" or t == "virtual" or (t, name) not in vanilla:
+            continue
+        if (t, name) in dlc and not bad(vanilla[(t, name)]) and not bad(dlc[(t, name)]):
+            out.append([t, name])
+        else:
+            dropped.append(name)
+    dest = ROOT / "conformance" / "lane_signals.json"
+    dest.write_text("[\n" + ",\n".join(json.dumps(x) for x in out) + "\n]\n")
+    print(f"{len(out)} lane signals -> {dest}; dropped {len(dropped)}: {' '.join(dropped[:60])} ...")
 
 
 def load_cases(paths):
@@ -112,16 +162,28 @@ def main():
     ap.add_argument("--warmup", type=int, default=30, help="ticks between build and t=0 (power up)")
     ap.add_argument("--discover", action="store_true", help="export a blueprint with every option set")
     ap.add_argument("--signals", action="store_true", help="write the game's signal order to conformance/")
+    ap.add_argument("--dlc", action="store_true",
+                    help="run with Space Age, quality and elevated rails enabled (fsim models vanilla only)")
+    ap.add_argument("--lanes", action="store_true",
+                    help="write conformance/lane_signals.json: signals usable in vanilla and in Space Age")
     ap.add_argument("--bench", type=int, metavar="TICKS", help="time each blueprint alone for TICKS ticks")
     args = ap.parse_args()
     binary = pathlib.Path(os.environ.get("FACTORIO", DEFAULT_BIN))
     DATA.mkdir(parents=True, exist_ok=True)
 
+    with dlc_mods(args.dlc):
+        run(args, binary, ap)
+
+
+def run(args, binary, ap):
     if args.bench:
         results = bench(binary, load_cases(args.paths), args.warmup, args.bench)
         if args.out != ap.get_default("out"):
             pathlib.Path(args.out).write_text(json.dumps(results, indent=1))
         return
+
+    if args.lanes:
+        return lanes(binary)
 
     if args.discover or args.signals:
         write_cases([], 0, mode="discover" if args.discover else "signals")

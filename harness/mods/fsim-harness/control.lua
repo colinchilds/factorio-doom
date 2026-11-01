@@ -87,14 +87,31 @@ local function build_case(s, c, origin)
     end
   end
 
-  -- Power: copper-link substations within reach, and put an energy interface inside every
-  -- substation's supply area that has room for one (a substation inside a solid lamp screen
-  -- doesn't, and gets power through its copper links instead).
+  -- Power. A blueprint that copper-wires its own substations gets a single energy interface, so
+  -- any substation it failed to link shows up as unpowered entities. Otherwise copper-link
+  -- substations within reach and put an energy interface inside every substation's supply area
+  -- that has room for one (one inside a solid lamp screen doesn't; it gets power via its links).
   local subs = {}
   for _, e in pairs(built) do
     if e.name == "substation" then subs[#subs + 1] = e end
   end
   local copper = defines.wire_connector_id.pole_copper
+  local self_wired = false
+  for _, sub in pairs(subs) do
+    if sub.get_wire_connector(copper, true).connection_count > 0 then self_wired = true end
+  end
+  if self_wired then
+    for _, sub in pairs(subs) do
+      local pos = s.find_non_colliding_position("electric-energy-interface", sub.position, 8, 1)
+      if pos then
+        local eei = s.create_entity { name = "electric-energy-interface", position = pos, force = "player" }
+        eei.power_production = 1e9
+        eei.electric_buffer_size = 1e10
+        break
+      end
+    end
+    subs = {}
+  end
   for i = 1, #subs do
     for j = i + 1, #subs do
       local dx, dy = subs[i].position.x - subs[j].position.x, subs[i].position.y - subs[j].position.y

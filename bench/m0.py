@@ -29,10 +29,9 @@ HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "conformance"))
 from bp import EACH, GREEN, GREEN_IN, RED, RED_IN, RED_OUT, Blueprint, cond, out, sig  # noqa: E402
 
-ORDER = json.loads((HERE.parent / "conformance" / "signal_order.json").read_text())
-# Column signals: normal-quality items, then fluids, then entities. No virtual signals, so the
-# special ones (each/everything/anything) and the clock T can't collide with a column.
-COLUMN_SIGNALS = [sig(n, t) for kind in ("item", "fluid", "entity") for t, n, q in ORDER if t == kind and q == "normal"]
+# Column signals: safe in vanilla and Space Age (harness/run.py --lanes). No virtual signals, so
+# the special ones (each/everything/anything) and the clock T can't collide with a column.
+COLUMN_SIGNALS = [sig(n, t) for t, n in json.loads((HERE.parent / "conformance" / "lane_signals.json").read_text())]
 T = sig("signal-T")
 STAGES = 9
 GAP_AT = 5
@@ -114,10 +113,11 @@ def build(variant, w, h):
             b.wire(a, GREEN_IN, c, GREEN_IN)
         prev_bus_reader, prev_bus_conn = bus_readers[0], GREEN_IN
         if lamps:
-            row = [b.lamp(x, y, {"use_colors": True, "color_mode": 2, "rgb_signal": cols[x]}) for x in range(w) if (x, y) not in holes]
+            row = [b.lamp(x, y, {"use_colors": True, "color_mode": 2, "rgb_signal": cols[x]}, always_on=True) for x in range(w) if (x, y) not in holes]
             b.wire(st[-1], RED_OUT, row[0], 1)
             b.chain(row, 1)
     b.power()
+    b.link_power()
     return b
 
 

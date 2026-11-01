@@ -60,6 +60,7 @@ return function(e)
   sec.set_slot(2, { value = { type = "item", name = "iron-plate", quality = "normal" }, min = -3 })
 
   local lamp = s.create_entity { name = "small-lamp", position = { 10.5, 0.5 }, force = f }
+  lamp.always_on = true
   local lcb = lamp.get_or_create_control_behavior()
   lcb.use_colors = true
   lcb.color_mode = defines.control_behavior.lamp.color_mode.packed_rgb
