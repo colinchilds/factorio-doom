@@ -94,6 +94,19 @@ def decider_each(b):
 
 
 @case(ticks=6)
+def decider_select(b):
+    """Per-lane select: copy one wire or the other per lane (lane-wise min), and a condition on
+    one wire that copies the other wire."""
+    r, g = pair_inputs(b)
+    combs = [
+        b.decider(0, 2, [cond(EACH, "<", EACH, RED, GREEN)], [out(EACH, networks=RED)], [out(EACH, networks=GREEN)]),
+        b.decider(1, 2, [cond(EACH, ">", 3, GREEN)], [out(EACH, networks=RED)], [out(EACH, copy=False, constant=-9)]),
+        b.decider(2, 2, [cond(EACH, "=", sig("signal-A"), RED, GREEN)], [out(EACH, networks=GREEN)]),
+    ]
+    wire_inputs(b, combs, r, g)
+
+
+@case(ticks=6)
 def decider_logic(b):
     """AND/OR precedence, everything/anything, outputs of everything, empty inputs."""
     inp = b.constant(0, 0, {"signal-A": 5, "signal-D": -4, "signal-E": 9})
@@ -276,6 +289,27 @@ def wire_reach(b):
             far = b.constant(px - 12, 20, {"signal-A": 1})
             b.wire(far, 1, pole, 1)
         b.wire(pole, 1, b.arithmetic(px + 3, 20, EACH, "*", 1, EACH), RED_IN)
+
+
+@case(ticks=4)
+def pole_reach(b):
+    """Circuit wires between two poles: measured center to center or footprint to footprint?
+    Each pair: constant -> pole A -> pole B -> combinator, with B at a given offset from A."""
+    for i, (dx, dy) in enumerate([(9, 0), (10, 0), (6, 6), (7, 7), (1, 9), (1, 10)]):
+        x = 30 * i
+        src = b.constant(x, 0, {"signal-A": i + 1})
+        a = b.pole(x + 1, 0)
+        c = b.pole(x + 1 + dx, dy)
+        b.wire(src, 1, a, 1)
+        b.wire(a, 1, c, 1)
+        b.wire(c, 1, b.arithmetic(x + 2 + dx, dy, EACH, "*", 1, EACH), RED_IN)
+    # A medium pole to a big pole (2x2): footprint gap 9 but center distance 10.5.
+    src = b.constant(200, 0, {"signal-A": 9})
+    a = b.pole(201, 0)
+    big = b._add("big-electric-pole", 211 + 1, 0 + 1)
+    b.wire(src, 1, a, 1)
+    b.wire(a, 1, big, 1)
+    b.wire(big, 1, b.arithmetic(213, 0, EACH, "*", 1, EACH), RED_IN)
 
 
 def main():

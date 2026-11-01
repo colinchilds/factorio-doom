@@ -19,6 +19,9 @@ The tools so far:
 - **Sprite demo** (`demos/sprite.py`): a Freedoom monster (BSD-licensed art, `assets/freedoom/`)
   walking toward the camera, drawn by combinators at any `--size`. The `.txt` file it writes is a
   blueprint string to paste into the game.
+- **Raycaster** (`demos/raycast.py`): M1, flat-shaded walls rendered entirely by about 640
+  combinators at any `--size`, built with the netlist compiler (`compiler/`), which balances
+  latency, places and wires the circuit, and evaluates it as the reference.
 - **Demos** (`demos/`): `gradient.py` builds a 16×16 lamp screen laid out like the planned
   renderer's row stage. fsim and the game agree on it lamp for lamp.
 
@@ -47,6 +50,10 @@ python3 harness/run.py demos/gradient.json -o demos/golden/gradient_dump.json
 # UPS benchmarks: synthetic row-stage screens, timed in the game with recording off
 python3 bench/m0.py 160x100 320x200               # -> bench/gen/*.json
 python3 harness/run.py --bench 300 bench/gen/*_160x100.json -o bench/m0_160x100.json
+
+# Raycaster M1: generate, check every frame against the netlist evaluation
+python3 demos/raycast.py --size 160x100 --verify   # -> demos/gen/raycast_160x100.{json,txt}
+python3 harness/run.py --warmup 60 out/dir -o dump.json   # deep pipelines: settle before t0
 
 # Sprite demo: generate, check every frame against the reference, preview as a GIF
 python3 demos/sprite.py --size 160x100 --verify    # -> demos/gen/sprite_160x100.{json,txt}
@@ -80,7 +87,7 @@ Each of these was measured in the game and is checked by a conformance case.
 | Selector | Ties keep the game's internal signal order when selecting the max; the min list is the max list reversed. `index_comparator` supports `<`, `<=` and so on (N-highest / N-lowest). The index can come from a signal on either wire; a negative index gives nothing. Count and time modes are also covered. |
 | Signal order | The game's internal order (items, fluids, virtual, recipes, entities, …), saved in `conformance/signal_order.json`. Vanilla has **2,878 signal lanes** (1,439 signals × normal / quality-unknown). |
 | Lamps | Packed RGB = `(v>>16)&255, (v>>8)&255, v&255`. Components are clamped to 0–255. Color mapping uses the first positive color signal in prototype order; with none, the lamp shows its default color. A lamp with no wires ignores its circuit settings. |
-| Wire reach | A wire connects when the straight-line **gap between the two tile footprints** is ≤ the *shorter* reach of its two ends. Combinators, lamps and constants reach 9, small poles 7.5, medium 9, big 32, substations 18. Longer wires are silently dropped when a blueprint is built; fsim warns about them. |
+| Wire reach | A wire connects when the straight-line **gap between the two tile footprints** is ≤ the *shorter* reach of its two ends; **between two poles it's the distance between their centers** instead. Combinators, lamps and constants reach 9, small poles 7.5, medium 9, big 32, substations 18. Longer wires are silently dropped when a blueprint is built; fsim warns about them. |
 | Per-entity wire selection (2.1.7) | `input_networks` / `output_networks` don't exist for combinators (they always choose wires per signal); only lamps and similar entities have them. |
 
 ## Not simulated yet

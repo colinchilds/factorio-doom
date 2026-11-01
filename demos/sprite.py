@@ -356,6 +356,7 @@ def build(w, h, prefix):
         above = (mux, shift, pal)
     b.power()
     b.link_power()
+    b.check_reach()
     meta = {"w": w, "h": h, "sprite": prefix, "frames": names, "sw": sw, "sh": sh, "nw": nw,
             "colors": colors, "holes": sorted(holes)}
     return b, meta, words

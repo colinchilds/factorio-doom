@@ -153,6 +153,35 @@ class Blueprint:
             # Supply area: 18x18 centered on (x + 1, y + 1), i.e. tiles x-8 .. x+9.
             targets = {(a, b) for a, b in targets if not (x - 8 <= a <= x + 9 and y - 8 <= b <= y + 9)}
 
+    REACH = {"medium-electric-pole": 9, "small-electric-pole": 7.5, "big-electric-pole": 32, "substation": 18}
+
+    def check_reach(self):
+        """Raise if any circuit wire is longer than the game allows (it silently drops those):
+        the footprint gap (center distance between two poles) must be <= the shorter reach of
+        the two ends (9 for combinators and lamps)."""
+        rects = {}
+        for e in self.entities:
+            w, h = self.SIZES.get(e["name"], (1, 1))
+            if e.get("direction", 0) in (4, 12):
+                w, h = h, w
+            x0, y0 = e["position"]["x"] - w / 2, e["position"]["y"] - h / 2
+            rects[e["entity_number"]] = (x0, y0, x0 + w, y0 + h, self.REACH.get(e["name"], 9))
+        for a, ca, c, cc in self.wires:
+            if ca == COPPER:
+                continue
+            ra, rc = rects[a], rects[c]
+            if self.is_pole(a) and self.is_pole(c):   # pole to pole: center to center
+                gx = (ra[0] + ra[2] - rc[0] - rc[2]) / 2
+                gy = (ra[1] + ra[3] - rc[1] - rc[3]) / 2
+            else:                                      # otherwise: footprint gap
+                gx = max(0, rc[0] - ra[2], ra[0] - rc[2])
+                gy = max(0, rc[1] - ra[3], ra[1] - rc[3])
+            if (gx * gx + gy * gy) ** 0.5 > min(ra[4], rc[4]) + 1e-9:
+                raise ValueError(f"wire #{a} -> #{c} is {(gx * gx + gy * gy) ** 0.5:.2f} tiles, over reach")
+
+    def is_pole(self, n):
+        return self.entities[n - 1]["name"] in self.REACH
+
     def link_power(self, reach=18):
         """Copper-wire the substations into one electric network (a minimum spanning tree over
         center distances). Blueprints only carry the wires they list, so without this every

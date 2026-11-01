@@ -1,0 +1,684 @@
+{
+ "blueprint": {
+  "item": "blueprint",
+  "label": "pole_reach",
+  "entities": [
+   {
+    "entity_number": 1,
+    "name": "constant-combinator",
+    "position": {
+     "x": 0.5,
+     "y": 0.5
+    },
+    "control_behavior": {
+     "sections": {
+      "sections": [
+       {
+        "index": 1,
+        "filters": [
+         {
+          "index": 1,
+          "type": "virtual",
+          "name": "signal-A",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 1
+         }
+        ]
+       }
+      ]
+     }
+    }
+   },
+   {
+    "entity_number": 2,
+    "name": "medium-electric-pole",
+    "position": {
+     "x": 1.5,
+     "y": 0.5
+    }
+   },
+   {
+    "entity_number": 3,
+    "name": "medium-electric-pole",
+    "position": {
+     "x": 10.5,
+     "y": 0.5
+    }
+   },
+   {
+    "entity_number": 4,
+    "name": "arithmetic-combinator",
+    "position": {
+     "x": 11.5,
+     "y": 1
+    },
+    "control_behavior": {
+     "arithmetic_conditions": {
+      "operation": "*",
+      "output_signal": {
+       "type": "virtual",
+       "name": "signal-each"
+      },
+      "first_signal": {
+       "type": "virtual",
+       "name": "signal-each"
+      },
+      "second_constant": 1
+     }
+    }
+   },
+   {
+    "entity_number": 5,
+    "name": "constant-combinator",
+    "position": {
+     "x": 30.5,
+     "y": 0.5
+    },
+    "control_behavior": {
+     "sections": {
+      "sections": [
+       {
+        "index": 1,
+        "filters": [
+         {
+          "index": 1,
+          "type": "virtual",
+          "name": "signal-A",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 2
+         }
+        ]
+       }
+      ]
+     }
+    }
+   },
+   {
+    "entity_number": 6,
+    "name": "medium-electric-pole",
+    "position": {
+     "x": 31.5,
+     "y": 0.5
+    }
+   },
+   {
+    "entity_number": 7,
+    "name": "medium-electric-pole",
+    "position": {
+     "x": 41.5,
+     "y": 0.5
+    }
+   },
+   {
+    "entity_number": 8,
+    "name": "arithmetic-combinator",
+    "position": {
+     "x": 42.5,
+     "y": 1
+    },
+    "control_behavior": {
+     "arithmetic_conditions": {
+      "operation": "*",
+      "output_signal": {
+       "type": "virtual",
+       "name": "signal-each"
+      },
+      "first_signal": {
+       "type": "virtual",
+       "name": "signal-each"
+      },
+      "second_constant": 1
+     }
+    }
+   },
+   {
+    "entity_number": 9,
+    "name": "constant-combinator",
+    "position": {
+     "x": 60.5,
+     "y": 0.5
+    },
+    "control_behavior": {
+     "sections": {
+      "sections": [
+       {
+        "index": 1,
+        "filters": [
+         {
+          "index": 1,
+          "type": "virtual",
+          "name": "signal-A",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 3
+         }
+        ]
+       }
+      ]
+     }
+    }
+   },
+   {
+    "entity_number": 10,
+    "name": "medium-electric-pole",
+    "position": {
+     "x": 61.5,
+     "y": 0.5
+    }
+   },
+   {
+    "entity_number": 11,
+    "name": "medium-electric-pole",
+    "position": {
+     "x": 67.5,
+     "y": 6.5
+    }
+   },
+   {
+    "entity_number": 12,
+    "name": "arithmetic-combinator",
+    "position": {
+     "x": 68.5,
+     "y": 7
+    },
+    "control_behavior": {
+     "arithmetic_conditions": {
+      "operation": "*",
+      "output_signal": {
+       "type": "virtual",
+       "name": "signal-each"
+      },
+      "first_signal": {
+       "type": "virtual",
+       "name": "signal-each"
+      },
+      "second_constant": 1
+     }
+    }
+   },
+   {
+    "entity_number": 13,
+    "name": "constant-combinator",
+    "position": {
+     "x": 90.5,
+     "y": 0.5
+    },
+    "control_behavior": {
+     "sections": {
+      "sections": [
+       {
+        "index": 1,
+        "filters": [
+         {
+          "index": 1,
+          "type": "virtual",
+          "name": "signal-A",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 4
+         }
+        ]
+       }
+      ]
+     }
+    }
+   },
+   {
+    "entity_number": 14,
+    "name": "medium-electric-pole",
+    "position": {
+     "x": 91.5,
+     "y": 0.5
+    }
+   },
+   {
+    "entity_number": 15,
+    "name": "medium-electric-pole",
+    "position": {
+     "x": 98.5,
+     "y": 7.5
+    }
+   },
+   {
+    "entity_number": 16,
+    "name": "arithmetic-combinator",
+    "position": {
+     "x": 99.5,
+     "y": 8
+    },
+    "control_behavior": {
+     "arithmetic_conditions": {
+      "operation": "*",
+      "output_signal": {
+       "type": "virtual",
+       "name": "signal-each"
+      },
+      "first_signal": {
+       "type": "virtual",
+       "name": "signal-each"
+      },
+      "second_constant": 1
+     }
+    }
+   },
+   {
+    "entity_number": 17,
+    "name": "constant-combinator",
+    "position": {
+     "x": 120.5,
+     "y": 0.5
+    },
+    "control_behavior": {
+     "sections": {
+      "sections": [
+       {
+        "index": 1,
+        "filters": [
+         {
+          "index": 1,
+          "type": "virtual",
+          "name": "signal-A",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 5
+         }
+        ]
+       }
+      ]
+     }
+    }
+   },
+   {
+    "entity_number": 18,
+    "name": "medium-electric-pole",
+    "position": {
+     "x": 121.5,
+     "y": 0.5
+    }
+   },
+   {
+    "entity_number": 19,
+    "name": "medium-electric-pole",
+    "position": {
+     "x": 122.5,
+     "y": 9.5
+    }
+   },
+   {
+    "entity_number": 20,
+    "name": "arithmetic-combinator",
+    "position": {
+     "x": 123.5,
+     "y": 10
+    },
+    "control_behavior": {
+     "arithmetic_conditions": {
+      "operation": "*",
+      "output_signal": {
+       "type": "virtual",
+       "name": "signal-each"
+      },
+      "first_signal": {
+       "type": "virtual",
+       "name": "signal-each"
+      },
+      "second_constant": 1
+     }
+    }
+   },
+   {
+    "entity_number": 21,
+    "name": "constant-combinator",
+    "position": {
+     "x": 150.5,
+     "y": 0.5
+    },
+    "control_behavior": {
+     "sections": {
+      "sections": [
+       {
+        "index": 1,
+        "filters": [
+         {
+          "index": 1,
+          "type": "virtual",
+          "name": "signal-A",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 6
+         }
+        ]
+       }
+      ]
+     }
+    }
+   },
+   {
+    "entity_number": 22,
+    "name": "medium-electric-pole",
+    "position": {
+     "x": 151.5,
+     "y": 0.5
+    }
+   },
+   {
+    "entity_number": 23,
+    "name": "medium-electric-pole",
+    "position": {
+     "x": 152.5,
+     "y": 10.5
+    }
+   },
+   {
+    "entity_number": 24,
+    "name": "arithmetic-combinator",
+    "position": {
+     "x": 153.5,
+     "y": 11
+    },
+    "control_behavior": {
+     "arithmetic_conditions": {
+      "operation": "*",
+      "output_signal": {
+       "type": "virtual",
+       "name": "signal-each"
+      },
+      "first_signal": {
+       "type": "virtual",
+       "name": "signal-each"
+      },
+      "second_constant": 1
+     }
+    }
+   },
+   {
+    "entity_number": 25,
+    "name": "constant-combinator",
+    "position": {
+     "x": 200.5,
+     "y": 0.5
+    },
+    "control_behavior": {
+     "sections": {
+      "sections": [
+       {
+        "index": 1,
+        "filters": [
+         {
+          "index": 1,
+          "type": "virtual",
+          "name": "signal-A",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 9
+         }
+        ]
+       }
+      ]
+     }
+    }
+   },
+   {
+    "entity_number": 26,
+    "name": "medium-electric-pole",
+    "position": {
+     "x": 201.5,
+     "y": 0.5
+    }
+   },
+   {
+    "entity_number": 27,
+    "name": "big-electric-pole",
+    "position": {
+     "x": 212,
+     "y": 1
+    }
+   },
+   {
+    "entity_number": 28,
+    "name": "arithmetic-combinator",
+    "position": {
+     "x": 213.5,
+     "y": 1
+    },
+    "control_behavior": {
+     "arithmetic_conditions": {
+      "operation": "*",
+      "output_signal": {
+       "type": "virtual",
+       "name": "signal-each"
+      },
+      "first_signal": {
+       "type": "virtual",
+       "name": "signal-each"
+      },
+      "second_constant": 1
+     }
+    }
+   },
+   {
+    "entity_number": 29,
+    "name": "substation",
+    "position": {
+     "x": 1,
+     "y": 2
+    }
+   },
+   {
+    "entity_number": 30,
+    "name": "substation",
+    "position": {
+     "x": 9,
+     "y": 1
+    }
+   },
+   {
+    "entity_number": 31,
+    "name": "substation",
+    "position": {
+     "x": 31,
+     "y": 2
+    }
+   },
+   {
+    "entity_number": 32,
+    "name": "substation",
+    "position": {
+     "x": 40,
+     "y": 1
+    }
+   },
+   {
+    "entity_number": 33,
+    "name": "substation",
+    "position": {
+     "x": 61,
+     "y": 2
+    }
+   },
+   {
+    "entity_number": 34,
+    "name": "substation",
+    "position": {
+     "x": 91,
+     "y": 2
+    }
+   },
+   {
+    "entity_number": 35,
+    "name": "substation",
+    "position": {
+     "x": 121,
+     "y": 2
+    }
+   },
+   {
+    "entity_number": 36,
+    "name": "substation",
+    "position": {
+     "x": 151,
+     "y": 2
+    }
+   },
+   {
+    "entity_number": 37,
+    "name": "substation",
+    "position": {
+     "x": 201,
+     "y": 2
+    }
+   },
+   {
+    "entity_number": 38,
+    "name": "substation",
+    "position": {
+     "x": 210,
+     "y": 1
+    }
+   },
+   {
+    "entity_number": 39,
+    "name": "substation",
+    "position": {
+     "x": 154,
+     "y": 13
+    }
+   }
+  ],
+  "wires": [
+   [
+    1,
+    1,
+    2,
+    1
+   ],
+   [
+    2,
+    1,
+    3,
+    1
+   ],
+   [
+    3,
+    1,
+    4,
+    1
+   ],
+   [
+    5,
+    1,
+    6,
+    1
+   ],
+   [
+    6,
+    1,
+    7,
+    1
+   ],
+   [
+    7,
+    1,
+    8,
+    1
+   ],
+   [
+    9,
+    1,
+    10,
+    1
+   ],
+   [
+    10,
+    1,
+    11,
+    1
+   ],
+   [
+    11,
+    1,
+    12,
+    1
+   ],
+   [
+    13,
+    1,
+    14,
+    1
+   ],
+   [
+    14,
+    1,
+    15,
+    1
+   ],
+   [
+    15,
+    1,
+    16,
+    1
+   ],
+   [
+    17,
+    1,
+    18,
+    1
+   ],
+   [
+    18,
+    1,
+    19,
+    1
+   ],
+   [
+    19,
+    1,
+    20,
+    1
+   ],
+   [
+    21,
+    1,
+    22,
+    1
+   ],
+   [
+    22,
+    1,
+    23,
+    1
+   ],
+   [
+    23,
+    1,
+    24,
+    1
+   ],
+   [
+    25,
+    1,
+    26,
+    1
+   ],
+   [
+    26,
+    1,
+    27,
+    1
+   ],
+   [
+    27,
+    1,
+    28,
+    1
+   ]
+  ],
+  "version": 562954249895938
+ },
+ "fsim": {
+  "ticks": 4,
+  "doc": "Circuit wires between two poles: measured center to center or footprint to footprint?\n    Each pair: constant -> pole A -> pole B -> combinator, with B at a given offset from A."
+ }
+}

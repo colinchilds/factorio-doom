@@ -221,12 +221,20 @@ impl Sim {
 }
 
 /// Wire length as the game checks it: the straight-line gap between the two tile footprints
-/// (0 when they touch). Verified by the `wire_reach` conformance case.
+/// (0 when they touch), except between two electric poles, where it is the distance between their
+/// centers. Verified by the `wire_reach` and `pole_reach` conformance cases.
 pub fn footprint_gap(a: &crate::model::Entity, b: &crate::model::Entity) -> f64 {
+    if is_pole(&a.name) && is_pole(&b.name) {
+        return ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt();
+    }
     let ((aw, ah), (bw, bh)) = (a.size(), b.size());
     let dx = ((a.x - b.x).abs() - (aw + bw) / 2.0).max(0.0);
     let dy = ((a.y - b.y).abs() - (ah + bh) / 2.0).max(0.0);
     (dx * dx + dy * dy).sqrt()
+}
+
+pub fn is_pole(name: &str) -> bool {
+    matches!(name, "small-electric-pole" | "medium-electric-pole" | "big-electric-pole" | "substation")
 }
 
 /// Circuit wire reach in tiles (normal quality), from the base game prototypes. A wire's reach is

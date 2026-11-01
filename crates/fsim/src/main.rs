@@ -76,10 +76,10 @@ fn main() -> Result<()> {
                 } else {
                     failed += 1;
                     println!("FAIL {:<20} {} of {} checks differ", r.name, r.mismatches.len(), r.checks);
-                    for m in r.mismatches.iter().take(12) {
+                    for m in r.mismatches.iter().take(std::env::var("FSIM_SHOW").ok().and_then(|v| v.parse().ok()).unwrap_or(12)) {
                         println!("    {m}");
                     }
-                    if r.mismatches.len() > 12 {
+                    if r.mismatches.len() > 12 && std::env::var("FSIM_SHOW").is_err() {
                         println!("    ... {} more", r.mismatches.len() - 12);
                     }
                 }
@@ -91,11 +91,12 @@ fn main() -> Result<()> {
         }
         Cmd::Run { blueprint, ticks, start_tick, frames, ppm, gif, every, scale, probes, nets } => {
             let m = model::parse(&model::load_file(&blueprint)?)?;
-            for w in &m.warnings {
-                eprintln!("warning: {w}");
-            }
             let ticks = ticks.or_else(|| m.meta.get("ticks").and_then(|t| t.as_u64()).map(|t| t as usize)).unwrap_or(60);
             let mut sim = Sim::new(m, start_tick);
+            // After Sim::new: building the networks adds the dropped-wire warnings.
+            for w in &sim.model.warnings {
+                eprintln!("warning: {w}");
+            }
             let mut net_probes = Vec::new();
             for spec in &nets {
                 let Some((e, c)) = spec.split_once(':') else { bail!("--net wants ENTITY:CONNECTOR") };

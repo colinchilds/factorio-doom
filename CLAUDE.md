@@ -54,26 +54,43 @@ is what makes this look feasible now.
   in `conformance/signal_order.json`). Space Age would add more, but the signal order file would
   have to be regenerated with DLC enabled.
 
-## Planned renderer architecture (not built yet)
+## Renderer architecture
+
+M1 (flat-shaded walls) is built and verified; see "Raycaster M1" below. The original plan had
+one column unit (~20 combinators) per screen column. The built design is far smaller: **the
+whole ray march is vector ops with lanes = screen columns**, about 640 combinators at any width.
 
 ```
-Game state (scalars) ─► Column units (×W) ─► column bus ─► Row/pixel stage ─► lamps
- x, y, angle, sin/cos     per-column ray      lanes =      textures, shading,
- enemies, doors           lanes = DDA steps   columns      sprites, floor/ceiling
+Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► shade ─► one decider per row ─► lamps
+ x, y, angle, sin/cos    RDX, RDY        each step one W-lane        wall height,
+ (bit-sliced lookups)    per column      network; running per-lane   brightness, color
+                                         min keeps the nearest hit
 ```
 
-1. **Game state:** player position in fixed point, angle 0–255 with a sin/cos lookup, enemies,
-   doors.
-2. **Column units, one per screen column.**
-   - The ray is a few scalars (`dir + plane*camX`).
-   - The lanes are all candidate grid-line crossings at once (k = 0..15 for vertical lines and
-     0..15 for horizontal), with `t_k = t0 + k*Δ`.
-   - A map-lookup decider marks which lanes hit a wall, and a selector (ascending, index 0)
-     picks the nearest hit.
-   - Pack `dist | wall type | side | tex u` into one int, so picking the nearest hit carries the
-     other fields along.
-   - Each column outputs its result on its own column signal. All columns wire onto one bus, so
-     the transpose to "lanes = columns" costs nothing, and the bus doubles as the depth buffer.
+1. **Game state:** position in 1/256 tiles, angle 0–255, cos/sin as bit-sliced lookup deciders
+   on a scalar (one decider per output bit, an OR over the angles with that bit set).
+2. **Rays:** `RD = dir + (plane * camX) >> 10` per lane, where camX is a constant vector.
+   Forced odd (`OR` with a ones vector) so a component is never 0.
+3. **March (lanes = columns), once for vertical grid lines and once for horizontal ones:**
+   - Step k is one network holding every column's k-th crossing: distance `D_k` (2^10 per
+     tile, doubled, +1 on the horizontal march so it carries the side) and the map key
+     `64*(x+1) + y` of the cell entered. Steps are recurrences (`Y_{k+1} = Y_k + ΔY`).
+   - A lookup decider per step (OR over the wall keys) outputs `-2^30` on wall lanes. Added to
+     `D_k` on the same wire, that makes hits negative.
+   - A running min per step (`Each(red) < Each(green)` → copy red, else copy green) keeps the
+     nearest hit. Steps are staggered one tick apart, which is exactly the min chain's pace.
+   - Out-of-map keys can alias real wall keys, but only for crossings beyond the boundary wall,
+     which is always nearer. So the map must be closed.
+4. **Shade:** `DS = min + 2^30`, wall height `H*2048/DS`, brightness `15*8192/(DS+8192) + 1`,
+   a base color per side (channels ≤ 15, so `brightness * base` can't carry between channels).
+5. **Rows:** one decider per screen row: `LH > |2y+1-H|` → copy the color vector, else the
+   row's floor/ceiling color (a decider else-output).
+
+Still to come (M3+): textures via the packed-strip path the sprite demo proved, sprites and
+the rest below.
+
+Earlier notes that still hold:
+
 3. **Row or pixel stage.** Two layouts:
    - One network per row, with W lanes.
    - A whole-frame vector with one lane per pixel, filled by the broadcast trick. Same total
@@ -181,6 +198,9 @@ The game is the referee, and fsim is the fast development loop:
    - `render.rs`: lamp grid to images.
    - `conform.rs`: maps game dump rows onto simulation ticks.
 
+   `run` prints a warning for every wire the game would drop (before 2026-11-01 these were
+   computed but never printed). `FSIM_SHOW=N fsim conform` shows more than 12 mismatches.
+
    Speed: about 16 µs per tick for 328 entities, 2.7 ms at 160×100 and 11 ms at 320×200 for the
    M0 pixel stage. Lookup deciders are about 100× slower than in the game (10 ns per lane ×
    condition). Nothing is optimized yet; it will need to be for 320×200 development.
@@ -207,7 +227,18 @@ The game is the referee, and fsim is the fast development loop:
      `demos/golden/gradient_dump.json` for the demo. `cargo test` checks fsim against both.
 4. **Demo** (`demos/gradient.py`): a 16×16 screen in the row-stage layout. It matches the game
    on all 24,705 checks.
-5. **Benchmarks** (`bench/m0.py`): synthetic row-stage blueprints at any W×H, written to
+5. **Netlist compiler** (`compiler/netlist.py`, `compiler/semantics.py`): write the circuit as
+   a dataflow graph (vector ops `vv`/`vc`/`vs`, scalar ops `ss`, bit-sliced `lookup_scalar`,
+   raw deciders). It:
+   - balances latency (inserts shared `Each + 0` delays so every input carries the same frame);
+   - gives each consumer its own constant combinator, and duplicates a node whose output must
+     join two different networks of one color;
+   - places one tile column per time step (right to left from the sinks), each node at the mean
+     row of its consumers, leaving the column between steps for constants and relay poles;
+   - wires each network as a minimum spanning tree, bridging long edges with medium poles;
+   - evaluates the graph without timing (`Graph.evaluate`), using the same specs it emits. That
+     evaluation is the reference: the simulated blueprint must match it frame for frame.
+6. **Benchmarks** (`bench/m0.py`): synthetic row-stage blueprints at any W×H, written to
    `bench/gen/` (gitignored, up to 13 MB each).
 
 ### Sprite demo (`demos/sprite.py`, 2026-11-01)
@@ -238,6 +269,18 @@ any `--size`. It proves the texture path planned above:
   - Generated files go to `demos/gen/` (gitignored). The `.txt` file is the blueprint string to
     paste.
 
+### Raycaster M1 (`demos/raycast.py`, 2026-11-01)
+
+Flat-shaded walls, floor and ceiling, 16×16 original map, the camera circling and turning on
+a script. Built with the netlist compiler at any `--size`.
+- **Size:** 577 / 637 / 737 combinators at 64×40 / 160×100 / 320×200, plus lamps. Latency 42
+  ticks, a new frame every tick.
+- **Checks:**
+  - `--verify` compares every fsim frame with the netlist evaluation (exact), and samples the
+    float raycaster (`ideal()`, within about 2% of pixels: rounding at wall edges).
+  - The 64×40 version matches the game on 220,455 checks. Deep pipelines need the harness
+    run with `--warmup 60`, so the warm-up state settles before t0 in both the game and fsim.
+
 ## Status (2026-11-01)
 
 Done:
@@ -249,25 +292,18 @@ Done:
 - Screen size decided (160×100, aiming for 320×200), and M0 UPS measurements: 320×200 fits.
 - Freedoom sprite assets and the sprite demo (above): the texture path works end to end in fsim
   at three sizes and in the game.
+- The netlist compiler and the M1 raycaster (above).
 
 Commit only when the user asks.
 
 ## Next steps (in order)
 
-1. **Bit-exact reference raycaster** (Rust, int32 fixed point): the same math the combinators
-   will do, including rounding and overflow. It's the oracle for every renderer stage.
-2. **Netlist compiler:** a small dataflow description of vector ops on named wires, compiled to
-   a blueprint.
-   - Insert delays so every path to a stage has the same latency.
-   - Place entities and wires within reach (footprint gap ≤ 9) and add power.
-   - Check each stage against the reference in fsim, then once in the game via the harness.
-3. **Input prototype** (gate pen) in the game.
-4. **Milestones:**
-   - M1: fixed camera, flat-shaded walls.
-   - M2: input, movement, collision.
-   - M3: textures and distance shading.
-   - M4: sprites, enemies, shooting, HUD, doors.
-   - M5 (stretch): angled walls and varying heights.
+1. **Input prototype** (gate pen) in the game, then M2: movement and collision driven by it.
+2. **M3:** textures (the sprite demo's strip path, keyed by wall type and texture u from the
+   march) and distance shading per texture.
+3. **M4:** sprites, enemies, shooting, HUD, doors. M5 (stretch): angled walls, varying heights.
+4. **Tooling as needed:** fsim speed for 320×200 work (lookups are about 100× slower than the
+   game); the Python netlist evaluation takes about 3 s per frame at 320×200.
 
 ## Rules for working here
 
@@ -275,6 +311,10 @@ Commit only when the user asks.
   game, make fsim match, and refresh the golden dump. Several obvious guesses turned out wrong:
   the min tie order, lanes when red + green sums to 0, wire reach being measured footprint to
   footprint, and lamp color lagging its condition by one tick less.
+- **Pole-to-pole circuit wires are measured center to center** (≤ 9 for medium poles), not
+  footprint to footprint (`pole_reach` case). A relay chain spaced by footprint gap silently
+  lost its wires in the game. `Blueprint.check_reach()` checks both rules; call it on every
+  generated blueprint.
 - **Generated layouts must keep every wire's footprint gap ≤ 9** (the shorter reach of its two
   ends). The game silently drops longer wires. fsim warns about them, so treat that warning as
   an error.
