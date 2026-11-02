@@ -82,89 +82,109 @@ def trig(fn):
     return {a: round(1024 * fn(2 * math.pi * a / 256)) + 1024 for a in range(256)}
 
 
-def build_graph(w, h):
-    g = Graph()
+def camera_tables(offset=0):
+    """Per view angle a (0..255, plus offset): direction DX, DY (scale 1024), camera plane
+    PLX, PLY and the ray base DX10, DY10 ((D << 10) | 512)."""
+    t = {}
+    for a in range(256):
+        th = 2 * math.pi * ((a + offset) % 256) / 256
+        dx, dy = round(1024 * math.cos(th)), round(1024 * math.sin(th))
+        t[a] = {"DX": dx, "DY": dy, "PLX": (dy * -PLANE) >> 10, "PLY": (dx * PLANE) >> 10,
+                "DX10": (dx << 10) | 512, "DY10": (dy << 10) | 512}
+    return t
+
+
+def scripted_camera(g):
+    """M1's camera: circles CENTER and turns, driven by the clock."""
+    T = g.clock()
+    A = g.ss(g.ss(T, ">>", 1), "AND", 255, "view angle")
+    B = g.ss(g.ss(T, ">>", 2), "AND", 255, "path angle")
+    cos_t, sin_t = trig(math.cos), trig(math.sin)
+    OX = g.ss(g.lookup_scalar(B, cos_t, 12, "cosB"), "-", 1024)
+    OY = g.ss(g.lookup_scalar(B, sin_t, 12, "sinB"), "-", 1024)
+    PX = g.ss(g.ss(g.ss(g.ss(OX, "*", RADIUS), ">>", 10), "+", int(CENTER[0])), "OR", 1, "px")
+    PY = g.ss(g.ss(g.ss(g.ss(OY, "*", RADIUS), ">>", 10), "+", int(CENTER[1])), "OR", 1, "py")
+    return A, PX, PY, {"T": T}
+
+
+def build_graph(w, h, camera=scripted_camera, g=None):
+    """camera(g) -> (A, PX, PY, extra scalars): view angle 0..255 and an odd position (1/FP
+    tiles) as scalars of g."""
+    g = g or Graph()
     cols = LANE_SIGNALS[:w]
     vec = lambda vals, label="vec": g.const([(cols[c], v) for c, v in enumerate(vals)], label)
     ones = lambda: vec([1] * w, "ones")
     camx = [(2 * c + 1 - w) * 1024 // w for c in range(w)]
     assert all(camx)
 
-    # -- scalars
-    T = g.clock()
-    A = g.ss(g.ss(T, ">>", 1), "AND", 255, "view angle")
-    B = g.ss(g.ss(T, ">>", 2), "AND", 255, "path angle")
-    cos_t, sin_t = trig(math.cos), trig(math.sin)
-    DX = g.ss(g.lookup_scalar(A, cos_t, 12, "cosA"), "-", 1024)
-    DY = g.ss(g.lookup_scalar(A, sin_t, 12, "sinA"), "-", 1024)
-    OX = g.ss(g.lookup_scalar(B, cos_t, 12, "cosB"), "-", 1024)
-    OY = g.ss(g.lookup_scalar(B, sin_t, 12, "sinB"), "-", 1024)
-    PX = g.ss(g.ss(g.ss(g.ss(OX, "*", RADIUS), ">>", 10), "+", int(CENTER[0])), "OR", 1, "px")
-    PY = g.ss(g.ss(g.ss(g.ss(OY, "*", RADIUS), ">>", 10), "+", int(CENTER[1])), "OR", 1, "py")
-    PLX = g.ss(g.ss(DY, "*", -PLANE), ">>", 10)
-    PLY = g.ss(g.ss(DX, "*", PLANE), ">>", 10)
-    DX10 = g.ss(g.ss(DX, "<<", 10), "OR", 512)
-    DY10 = g.ss(g.ss(DY, "<<", 10), "OR", 512)
+    # -- scalars: the camera vectors come straight out of lookups keyed by the view angle,
+    # offset to be positive (bit-sliced lookups); the offsets come off in a constant on the wire.
+    A, PX, PY, extra = camera(g)
+    tabs = camera_tables(extra.pop("angle_offset", 0))
+    OP, OD = 1024, 1 << 21
+    look = lambda name, off, bits: g.lookup_scalar(A, {a: tabs[a][name] + off for a in range(256)}, bits, name)  # noqa: E731
+    PLX, PLY = look("PLX", OP, 11), look("PLY", OP, 11)
+    DX10, DY10 = look("DX10", OD, 22), look("DY10", OD, 22)
 
-    # -- ray directions per column (scale 1024), forced odd so never 0
+    # -- ray directions per column (scale 1024), forced odd so never 0:
+    # (camx * PL + D10) >> 10, the sum done by joining wires
+    corr = [-(camx[c] * OP + OD) for c in range(w)]
+
     def ray(PL, D10):
-        r = g.vc(g.vv(g.vs(vec(camx, "camx"), "*", PL), "+", g.broadcast(ones(), D10)), ">>", 10)
+        r = g.vc([g.vs(vec(camx, "camx"), "*", PL), g.broadcast(ones(), D10), vec(corr, "ray offset")], ">>", 10)
         return g.vv(r, "OR", ones())
     RDX, RDY = ray(PLX, DX10), ray(PLY, DY10)
 
     def march(RD, RO, P, PO, side):
-        """Crossings of the grid lines perpendicular to this axis. RD: ray component along the
-        axis, RO: the other one; P/PO: position along / across (scale FP)."""
+        """Crossings of the grid lines perpendicular to this axis, all K at once. RD: ray component
+        along the axis, RO: the other one; P/PO: position along / across (scale FP).
+
+        Crossing k: distance D_k = 2 * (T1 + k * DT) (+1 on side 1, so the min carries the side)
+        and map key ((Q + k * DQ) + J_k) >> 16, where Q/DQ is the across position in 2^16 per
+        tile and J_k = (64 * line_k + c) << 16 puts the line index into the key. Side 0 keys are
+        64 * (x + 1) + y, side 1 keys 64 * y + (x + 1) (its own wall table). Returns the K
+        (hit_k + D_k) leaves: a wall marks its lane with HIT, so the min is the nearest hit."""
         FR = g.ss(P, "AND", FP - 1)
         FI = g.ss(P, ">>", 8)
-        pos = lambda c: g.decider([sem.cond(EACH, ">", 0, RED)], [sem.out(EACH, constant=c)], red=RD)
-        S = g.decider([sem.cond(EACH, ">", 0, RED)], [sem.out(EACH, constant=1)], [sem.out(EACH, constant=-1)], red=RD)
+        sel = lambda a, b=None: g.decider([sem.cond(EACH, ">", 0, RED)], [sem.out(EACH, constant=a)],  # noqa: E731
+                                          [sem.out(EACH, constant=b)] if b is not None else None, red=RD)
+        S = sel(1, -1)
         AR = g.vv(RD, "*", S)
-        NUM = g.vv(pos(FP), "+", g.broadcast(ones(), g.ss(0, "-", FR)))         # (line - p), scale FP
-        T1 = g.vv(g.vc(NUM, "*", 4096), "/", RD)                                  # distance, 2^10 per tile
+        mFR = lambda m: g.broadcast(ones(), g.ss(FR, "*", -m))  # noqa: E731
+        T1 = g.vv([sel(FP * 4096), mFR(4096)], "/", RD)                       # (line - p) / RD, 2^10 per tile
         DT = g.vv(vec([1 << 20] * w, "c20"), "/", AR)
-        Q = g.vv(g.vv(g.vc(g.vv(NUM, "*", RO), "*", 256), "/", RD), "+", g.broadcast(ones(), g.ss(PO, "<<", 8)))
-        DQ = g.vv(g.vc(RO, "*", 65536), "/", AR)                                  # across, 2^16 per tile
-        if side == 0:   # vertical lines: integer part is x -> 64*(x+1); across part is y
-            IK = g.vv(pos(128), "+", g.broadcast(ones(), g.ss(FI, "<<", 6)))
-            STEP = g.vc(S, "*", 64)
-            cell = lambda q: g.vc(q, ">>", 16)
-        else:           # horizontal lines: integer part is y (+64 offset); across part is 64*x
-            IK = g.vv(pos(2), "+", g.broadcast(ones(), g.ss(FI, "+", 63)))
-            STEP = S
-            cell = lambda q: g.vc(g.vc(q, ">>", 16), "<<", 6)
-        D = g.vc(T1, "*", 2) if side == 0 else g.vc(g.vc(T1, "*", 2), "+", 1)
-        DD = g.vc(DT, "*", 2)
-        # Start each chain at the time its consumers need it, so only the increments need delays.
-        t0 = Q.time
-        lat_cell = 1 if side == 0 else 2   # ops in cell()
-        IK = g.delay(IK, t0 + lat_cell - IK.time) if IK.time < t0 + lat_cell else IK
-        D = g.delay(D, t0 + lat_cell + 2 - D.time) if D.time < t0 + lat_cell + 2 else D
-        best = None
-        walls = wall_keys()
+        Q = [g.vv(g.vv([sel(FP * 256), mFR(256)], "*", RO), "/", RD), g.broadcast(ones(), g.ss(PO, "<<", 8)),
+             g.broadcast(ones(), g.ss(FI, "<<", 22))]
+        Q.append(sel(128 << 16) if side == 0 else sel(65 << 16, -63 << 16))   # entering line FI+-1
+        DQ = [g.vv(g.vc(RO, "*", 65536), "/", AR), sel(1 << 22, -(1 << 22))]  # across step + line step
+        walls = wall_keys() if side == 0 else [64 * y + x + 1 for y, row in enumerate(MAP) for x, c in enumerate(row) if c == "#"]
         hit_conds = [sem.cond(EACH, "=", k, RED, "or" if i else None) for i, k in enumerate(walls)]
-        for k in range(K):
-            key = g.vv(IK, "+", cell(Q), f"key{side}.{k}")
-            hit = g.decider(hit_conds, [sem.out(EACH, constant=HIT)], red=key, label=f"hit{side}.{k}")
-            v = [hit, D]
-            if best is None:
-                best = v
-            else:
-                best = [g.decider([sem.cond(EACH, "<", EACH, RED, None, GREEN)], [sem.out(EACH, networks=RED)],
-                                  [sem.out(EACH, networks=GREEN)], red=best, green=v, label=f"min{side}.{k}")]
-            if k + 1 < K:
-                Q, IK, D = g.vv(Q, "+", DQ), g.vv(IK, "+", STEP), g.vv(D, "+", DD)
-        return best
+        keys = [g.vc(Q, ">>", 16, f"key{side}.0")]
+        keys += [g.vc(g.vv(Q, "+", g.vc(DQ, "*", k)), ">>", 16, f"key{side}.{k}") for k in range(1, K)]
+        hits = [g.decider(hit_conds, [sem.out(EACH, constant=HIT)], red=key, label=f"hit{side}.{k}")
+                for k, key in enumerate(keys)]
+        T2 = g.vc(T1, "*", 2)
+        DTd = g.delay(DT, max(0, hits[1].time - 2 - DT.time))
+        one = [ones()] if side else []
+        leaves = [[hits[0], T2] + one]
+        leaves += [[hits[k], g.vv(T2, "+", [g.vc(DTd, "*", 2 * k)] + one)] for k in range(1, K)]
+        return leaves
 
-    MX = march(RDX, RDY, PX, PY, 0)
-    MY = march(RDY, RDX, PY, PX, 1)
-    M = g.decider([sem.cond(EACH, "<", EACH, RED, None, GREEN)], [sem.out(EACH, networks=RED)],
-                  [sem.out(EACH, networks=GREEN)], red=MX, green=MY, label="min")
-    DS = g.vc(M, "+", 1 << 30, "DS")
-    LHB = g.vv(g.vv(vec([h << 11] * w, "h"), "/", DS), "+", ones(), "LH+1")
-    BR = g.vv(g.vv(vec([15 * FOG] * w, "fog"), "/", g.vc(DS, "+", FOG)), "+", ones(), "brightness")
-    BASE = g.vv(g.vc(g.vc(DS, "AND", 1), "*", pack(BASE_H) - pack(BASE_V)), "+", vec([pack(BASE_V)] * w, "base"))
-    COLOR = g.vv(BR, "*", BASE, "color")
+    # Nearest hit over both axes: a min tree (lane-wise: copy red if smaller, else green).
+    level = march(RDX, RDY, PX, PY, 0) + march(RDY, RDX, PY, PX, 1)
+    depth = 0
+    while len(level) > 1:
+        nxt = [g.decider([sem.cond(EACH, "<", EACH, RED, None, GREEN)], [sem.out(EACH, networks=RED)],
+                         [sem.out(EACH, networks=GREEN)], red=a, green=b, label=f"min{depth}.{i}")
+               for i, (a, b) in enumerate(zip(level[::2], level[1::2]))]
+        level = nxt + level[len(level) - len(level) % 2:]
+        depth += 1
+    M = level[0]
+    # DS = M + 2^30 is never formed: the constant rides on each consumer's wire.
+    LHB = g.vv(g.vv(vec([h << 11] * w, "h"), "/", [M, vec([1 << 30] * w, "2^30")]), "+", ones(), "LH+1")
+    BR = g.vv(vec([15 * FOG] * w, "fog"), "/", [M, vec([(1 << 30) + FOG] * w, "2^30+fog")], "brightness")
+    BASE = g.vc(g.vc(M, "AND", 1), "*", pack(BASE_H) - pack(BASE_V))
+    COLOR = g.vv([BR, ones()], "*", [BASE, vec([pack(BASE_V)] * w, "base")], "color")
 
     rows = []
     for y in range(h):
@@ -172,7 +192,7 @@ def build_graph(w, h):
                       [sem.out(EACH, constant=pack(background(y, h)))], red=COLOR, green=LHB, label=f"row{y}")
         n.fixed, n.pos = True, (-2, y)
         rows.append(n)
-    return g, cols, rows, {"T": T, "PX": PX, "PY": PY, "DX": DX, "DY": DY, "PLX": PLX, "PLY": PLY}
+    return g, cols, rows, {**extra, "A": A, "PX": PX, "PY": PY, "tables": tabs}
 
 
 
@@ -223,7 +243,8 @@ def evaluate(g, cols, rows, T):
 def ideal(g, scal, w, h, T):
     """Float raycaster from the same camera scalars, shaded the same way: a sanity check for the
     fixed-point math (not expected to match every pixel)."""
-    vals = {k: g.evaluate(T, [s.node])[0].get(sem.key(s.signal), 0) for k, s in scal.items()}
+    vals = {k: g.evaluate(T, [scal[k].node])[0].get(sem.key(scal[k].signal), 0) for k in ("A", "PX", "PY")}
+    vals.update(scal["tables"][vals["A"]])
     px, py = vals["PX"] / FP, vals["PY"] / FP
     img = [[pack(background(y, h))] * w for y in range(h)]
     for c in range(w):

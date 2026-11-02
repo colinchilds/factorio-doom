@@ -35,7 +35,11 @@ LANE_SIGNALS = [sig(n, t) for t, n in json.loads((ROOT / "conformance" / "lane_s
 SCALAR_NAMES = ([f"signal-{c}" for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"] + [f"signal-{d}" for d in range(10)]
                 + [f"signal-{c}" for c in ("red", "green", "blue", "yellow", "pink", "cyan", "white", "grey",
                                            "black", "check", "dot", "info", "deny")])
+# Every other virtual signal, after the original list (so earlier allocations don't change).
+SCALAR_NAMES += [n for t, n, q in json.loads((ROOT / "conformance" / "signal_order.json").read_text())
+                 if t == "virtual" and q == "normal" and n not in SCALAR_NAMES]
 REACH = 9
+RED_IN, GREEN_IN, RED_OUT, GREEN_OUT = 1, 2, 3, 4
 
 
 class Node:
@@ -44,7 +48,8 @@ class Node:
         self.red, self.green = list(red), list(green)
         self.time = time
         self.label = label
-        self.id = len(g.nodes)
+        self.id = g._next_id  # not len(g.nodes): passes drop nodes, and ids must stay unique
+        g._next_id += 1
         self.pos = None
         self.fixed = False
         g.nodes.append(self)
@@ -61,10 +66,13 @@ class Scalar:
 
 
 class Graph:
-    def __init__(self):
+    def __init__(self, reserved=()):
+        """reserved: signal names the graph must not allocate (those of external inputs)."""
         self.nodes = []
+        self._next_id = 0
         self._delays = {}
-        self._names = iter(SCALAR_NAMES)
+        reserved = {r if isinstance(r, str) else r["name"] for r in reserved}
+        self._names = iter([n for n in SCALAR_NAMES if n not in reserved])
 
     # -- construction --------------------------------------------------------------------------
 
@@ -78,6 +86,18 @@ class Graph:
         """signals: list of (signal, value). Constants have no time; each use gets its own copy
         when wiring (see _split_constants)."""
         return Node(self, "const", [(s, v) for s, v in signals if v], time=None, label=label)
+
+    def ext(self, entity, pos, size=(2, 1), connectors=(RED_OUT, GREEN_OUT), label="ext"):
+        """An existing entity (placed by the caller, footprint at pos with size) whose output feeds
+        the graph at frame time 0: a register, or a relay pole carrying one. connectors are the
+        (red, green) connector ids to wire to. Its value comes from evaluate(inputs=...)."""
+        n = Node(self, "ext", {"entity": entity, "size": size, "connectors": connectors}, time=0, label=label)
+        n.fixed, n.pos = True, pos
+        return n
+
+    def scalar(self, node, signal):
+        """A named signal on a node's output (e.g. one value of an ext register)."""
+        return Scalar(node, signal if isinstance(signal, dict) else sig(signal))
 
     def clock(self):
         """A free-running counter; its output is T (frame time 0)."""
@@ -125,9 +145,9 @@ class Graph:
         return self.vs(ones, "*", s, label or "bcast")
 
     # Scalar ops
-    def ss(self, a, op, b, label=""):
-        """a op b for scalars/ints; result is a new scalar."""
-        out = self.new_scalar_signal()
+    def ss(self, a, op, b, label="", out=None):
+        """a op b for scalars/ints; result is a new scalar (or the named signal out)."""
+        out = out or self.new_scalar_signal()
         first = a.signal if isinstance(a, Scalar) else a
         second = b.signal if isinstance(b, Scalar) else b
         srcs = [x.node for x in (a, b) if isinstance(x, Scalar)]
@@ -138,10 +158,10 @@ class Graph:
         n = self.op("arith", spec, _dedup(srcs), [], label)
         return Scalar(n, out)
 
-    def lookup_scalar(self, a, table, bits, label=""):
+    def lookup_scalar(self, a, table, bits, label="", out=None):
         """table[a] for a scalar a, as bit-sliced deciders: one per output bit, each an OR of the
         keys with that bit set, outputting the bit's weight. All bits land on one signal."""
-        out = self.new_scalar_signal()
+        out = out or self.new_scalar_signal()
         nodes = []
         for b in range(bits):
             keys = [k for k, v in table.items() if (v >> b) & 1]
@@ -156,9 +176,11 @@ class Graph:
 
     # -- evaluation ----------------------------------------------------------------------------
 
-    def evaluate(self, T, want):
-        """Outputs of the nodes in `want` for clock value T, ignoring timing."""
+    def evaluate(self, T, want, inputs=None):
+        """Outputs of the nodes in `want` for clock value T and ext values inputs ({node: signal
+        dict}), ignoring timing."""
         cache = {}
+        inputs = {k.id: v for k, v in (inputs or {}).items()}
 
         def val(n):
             if isinstance(n, Collect):
@@ -172,6 +194,8 @@ class Graph:
                 r = {sem.key(s): v for s, v in n.spec}
             elif n.kind == "clock":
                 r = {sem.key(n.spec["signal"]): T} if T else {}
+            elif n.kind == "ext":
+                r = dict(inputs.get(n.id, {}))
             else:
                 red, green = {}, {}
                 for m in n.red:
@@ -245,8 +269,8 @@ class Graph:
             if not clash:
                 return
             n, color, s = clash
-            if s.kind == "clock":
-                raise ValueError("the clock can feed only one network per color")
+            if s.kind in ("clock", "ext"):
+                raise ValueError(f"{s.kind} {s.label} can feed only one network per color")
             dup = Node(self, s.kind, s.spec, s.red, s.green, time=s.time, label=s.label + " dup")
             lst = getattr(n, color)
             setattr(n, color, [dup if x is s else x for x in lst])
@@ -282,6 +306,7 @@ class Collect:
         assert len(ts) == 1
         self.time = ts.pop()
         self.kind = "collect"
+        self.label = nodes[0].label
 
 
 def _l(x):
@@ -301,6 +326,9 @@ def _dedup(lst):
 
 def footprint(n, pos=None):
     x, y = pos or n.pos
+    if n.kind == "ext":
+        w, h = n.spec["size"]
+        return (x, y, x + w, y + h)
     w = 1 if n.kind == "const" else 2
     return (x, y, x + w, y + 1)
 
@@ -390,6 +418,8 @@ def _emit(g, b):
         if n.kind == "const":
             e = b.constant(x, y, n.spec)
             ent[n.id] = (e, e)
+        elif n.kind == "ext":
+            ent[n.id] = (n.spec["entity"], n.spec["entity"])
         elif n.kind == "clock":
             s = n.spec["signal"]
             c = b.constant(x + 2, y, [(s, 1)])
@@ -412,15 +442,16 @@ def _center_dist(a, b):
     return (((a[0] + a[2]) - (b[0] + b[2])) ** 2 + ((a[1] + a[3]) - (b[1] + b[3])) ** 2) ** 0.5 / 2
 
 
-def _relay(b, a_fp, a_end, c_fp, c_end, conn, usable, taken):
+def _relay(b, a_fp, a_end, c_fp, c_end, conn, usable, taken, a_pole=False, c_pole=False):
     """Wire a to c, adding medium poles when they're out of reach. Pole to entity is measured
-    footprint to footprint, pole to pole center to center (both reach 9)."""
-    prev_fp, prev_end, prev_pole = a_fp, a_end, False
+    footprint to footprint, pole to pole center to center (both reach 9). a_pole / c_pole: the
+    ends are poles themselves."""
+    prev_fp, prev_end, prev_pole = a_fp, a_end, a_pole
 
     def reaches(fp1, pole1, fp2, pole2):
         return (_center_dist(fp1, fp2) if pole1 and pole2 else gap(fp1, fp2)) <= REACH
 
-    while not reaches(prev_fp, prev_pole, c_fp, False):
+    while not reaches(prev_fp, prev_pole, c_fp, c_pole):
         tx, ty = (c_fp[0] + c_fp[2]) / 2, (c_fp[1] + c_fp[3]) / 2
         here = ((prev_fp[0] + prev_fp[2]) / 2 - tx) ** 2 + ((prev_fp[1] + prev_fp[3]) / 2 - ty) ** 2
         best = None
@@ -454,6 +485,8 @@ def _wire(g, nets, b, ent, usable):
         for s in net["src"]:
             if s.kind == "const":
                 members.append((s, 1 if color == "red" else 2))
+            elif s.kind == "ext":
+                members.append((s, s.spec["connectors"][0 if color == "red" else 1]))
             else:
                 members.append((s, RED_OUT if color == "red" else GREEN_OUT))
         for d in net["dst"]:
@@ -470,7 +503,9 @@ def _wire(g, nets, b, ent, usable):
             c_end = (ent[c.id][1 if cc in (RED_OUT, GREEN_OUT) else 0], cc)
             if dist > REACH:
                 n0 = len(b.entities)
-                _relay(b, fps[j], a_end, fps[i], c_end, 1 if color == "red" else 2, usable, taken)
+                is_pole = lambda n: n.kind == "ext" and b.is_pole(n.spec["entity"])  # noqa: E731
+                _relay(b, fps[j], a_end, fps[i], c_end, 1 if color == "red" else 2, usable, taken,
+                       is_pole(a), is_pole(c))
                 relays += len(b.entities) - n0
             else:
                 b.wire(*a_end, *c_end)

@@ -62,6 +62,9 @@ python3 demos/raycast.py --size 64x40 --substation-quality normal
 python3 demos/input_pad.py --size 320x200 --verify   # -> demos/gen/input_pad_n9.{json,txt}
 ./target/release/fsim run demos/gen/input_pad_n9.json --input inserts.json --probe 12  # [[tick, entity, item, count]]
 
+# M2: the raycaster driven by the pad (walk, turn, collide); player state vs reference, frames
+python3 demos/game.py --size 160x100 --verify      # -> demos/gen/game_160x100.{json,txt}
+
 # Sprite demo: generate, check every frame against the reference, preview as a GIF
 python3 demos/sprite.py --size 160x100 --verify    # -> demos/gen/sprite_160x100.{json,txt}
 ./target/release/fsim run demos/gen/sprite_160x100.json --every 2 --scale 4 --gif out/sprite.gif

@@ -67,18 +67,32 @@ Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► sh
                                          min keeps the nearest hit
 ```
 
-1. **Game state:** position in 1/256 tiles, angle 0–255, cos/sin as bit-sliced lookup deciders
-   on a scalar (one decider per output bit, an OR over the angles with that bit set).
-2. **Rays:** `RD = dir + (plane * camX) >> 10` per lane, where camX is a constant vector.
-   Forced odd (`OR` with a ones vector) so a component is never 0.
+1. **Game state:** position in 1/256 tiles, angle 0–255.
+   - Bit-sliced lookups on the angle give the camera plane and the scaled direction directly.
+     There's one decider per output bit, each an OR over the angles with that bit set.
+   - Table values are offset to be positive, and a constant vector on the next wire removes the
+     offset.
+2. **Rays:** `RD = (camX * plane + dir << 10 | 512) >> 10` per lane, where camX is a constant
+   vector.
+   - The sum is a plain wire join (no combinator).
+   - The result is forced odd (`OR` with a ones vector) so a component is never 0.
+   - **Latency rule:** additions of constants or of other vectors can ride on a consumer's
+     input wire for free, so fold them in instead of spending a tick on a `+` op.
 3. **March (lanes = columns), once for vertical grid lines and once for horizontal ones:**
    - Step k is one network holding every column's k-th crossing: distance `D_k` (2^10 per
-     tile, doubled, +1 on the horizontal march so it carries the side) and the map key
-     `64*(x+1) + y` of the cell entered. Steps are recurrences (`Y_{k+1} = Y_k + ΔY`).
+     tile, doubled, +1 on the horizontal march so it carries the side) and the key of the map
+     cell entered. Vertical lines use `64*(x+1) + y`; horizontal lines use `64*y + x + 1`,
+     with their own wall table.
+   - All K steps are computed at once, directly from k:
+     - `D_k = 2*(T1 + k*DT)`;
+     - `key_k = (Q + k*DQ' + J) >> 16`, where J and DQ' carry the line index in the key's
+       high part.
    - A lookup decider per step (OR over the wall keys) outputs `-2^30` on wall lanes. Added to
      `D_k` on the same wire, that makes hits negative.
-   - A running min per step (`Each(red) < Each(green)` → copy red, else copy green) keeps the
-     nearest hit. Steps are staggered one tick apart, which is exactly the min chain's pace.
+   - A min tree over all 2K leaves (`Each(red) < Each(green)` → copy red, else copy green,
+     depth 5) keeps the nearest hit.
+   - Before 2026-11-01 the steps were recurrences with a running-min chain. That cost 18 more
+     ticks of latency.
    - Out-of-map keys can alias real wall keys, but only for crossings beyond the boundary wall,
      which is always nearer. So the map must be closed.
 4. **Shade:** `DS = min + 2^30`, wall height `H*2048/DS`, brightness `15*8192/(DS+8192) + 1`,
@@ -285,8 +299,8 @@ any `--size`. It proves the texture path planned above:
 
 Flat-shaded walls, floor and ceiling, 16×16 original map, the camera circling and turning on
 a script. Built with the netlist compiler at any `--size`.
-- **Size:** 577 / 637 / 737 combinators at 64×40 / 160×100 / 320×200, plus lamps. Latency 42
-  ticks, a new frame every tick.
+- **Size:** 569 / 629 / 729 combinators at 64×40 / 160×100 / 320×200, plus lamps. Latency 24
+  ticks (42 before the parallel march), a new frame every tick.
 - **Checks:**
   - `--verify` compares every fsim frame with the netlist evaluation (exact), and samples the
     float raycaster (`ideal()`, within about 2% of pixels: rounding at wall edges).
@@ -332,6 +346,44 @@ Decided with the user:
     `--hold` is that + 1.
 - **Waiting on the user:** the gap meter's reading while holding Z. Set `DEFAULT_HOLD` to it + 1.
 
+### M2: movement (`demos/game.py`, 2026-11-01)
+
+The raycaster driven by the pad: walk, turn, slide along walls. Screen, then the pad on its
+right, then the player logic below the pad.
+- **State:** one register REG (`Each + 0`, green self-loop) holds X, Y (displacement from
+  SPAWN) and R (unbounded turn; the view angle is (R + A0) & 255).
+- **Player logic:** a netlist graph with **ext inputs**: `Graph.ext(entity, pos, ...)` is an
+  entity placed by the caller, feeding the graph at time 0. Here that's REG and the pad's HELD
+  network.
+  - Its fixed sink INC feeds REG, so REG(t) = REG(t-1) + f(REG(t-1-L), HELD(t-1-L)), with L = 8.
+  - `Graph.evaluate(inputs=...)` gives f, which the reference loop uses.
+- **Collision:**
+  - The player is a box of half-size MARGIN + (L+1)·SPEED. That covers how far REG moves
+    while the logic catches up.
+  - Each axis checks the box's leading edge against both cells the box spans on the other axis,
+    using a 2D wall lookup (an OR of AND pairs).
+  - Checking only the center line let diagonal moves cut into wall corners.
+- **Startup:**
+  - A pipeline that's still filling must add nothing. So every value INC sees is offset positive
+    (C1), and INC is `Each - C1`, which only touches lanes that are present.
+  - A constant -C1 instead shifted the spawn point by the fill time.
+- **Camera path:** REG reaches the raycaster's camera port (a pole left of the screen, the
+  raycaster graph's ext input) over a big-pole line above the screen.
+  `raycast.build_graph(w, h, camera)` takes the camera from the caller; M1's script is
+  `scripted_camera`.
+- **Checks:**
+  - `--verify`: REG matches the reference on every tick, the player box never touches a wall,
+    and sampled frames match the raycaster evaluation, at 64×40, 160×100 and 320×200.
+  - The 64×40 build matches the game on 837,549 checks (`harness/run.py --warmup 60`, scripted
+    inserts).
+  - 160×100 and 320×200 import in Space Age, fully powered, at 0.38 and 0.86 ms per tick.
+- **Input-to-screen latency:**
+  - **Measured:** about 27 ticks for turning (pad 3, turn deciders straight into REG, raycaster
+    23 with the lamps) and about 35 for walking (the player loop adds L + 1 = 9).
+  - **Before:** about 56 ticks. The user felt "almost a full second".
+  - **The rest of the raycaster's 23:** camera lookups 2, rays 3, march setup 6, keys and hits
+    2, min tree 5, shading 3, rows 1, lamps 1.
+
 ## Status (2026-11-01)
 
 Done:
@@ -339,6 +391,7 @@ Done:
 - fsim, the harness, the conformance suite (14 cases, including chests) and the gradient demo.
   All match the real game exactly.
 - The input pad (above): decided with the user, matches the game.
+- M2 movement (above): matches the game.
 - Measured semantics: see the README table, and `sim.rs` / `conform.rs` doc comments for the
   timing model.
 - Screen size decided (160×100, aiming for 320×200), and M0 UPS measurements: 320×200 fits.
@@ -350,13 +403,10 @@ Commit only when the user asks.
 
 ## Next steps (in order)
 
-1. **M2:** the pad's HELD/PRESSED vectors drive position and angle registers (stateful logic,
-   which the netlist compiler can't express yet: it's feed-forward with a timing-free
-   evaluation), plus collision through the map lookup. Put the pad left of the screen.
-2. **M3:** textures (the sprite demo's strip path, keyed by wall type and texture u from the
+1. **M3:** textures (the sprite demo's strip path, keyed by wall type and texture u from the
    march) and distance shading per texture.
-3. **M4:** sprites, enemies, shooting, HUD, doors. M5 (stretch): angled walls, varying heights.
-4. **Tooling as needed:** fsim speed for 320×200 work (lookups are about 100× slower than the
+2. **M4:** sprites, enemies, shooting, HUD, doors. M5 (stretch): angled walls, varying heights.
+3. **Tooling as needed:** fsim speed for 320×200 work (lookups are about 100× slower than the
    game); the Python netlist evaluation takes about 3 s per frame at 320×200.
 
 ## Rules for working here
