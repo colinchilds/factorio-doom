@@ -1,4 +1,4 @@
-"""M3 raycaster: Freedoom-textured walls, floor and ceiling, a scripted camera, at any --size.
+"""M3 raycaster: Freedoom-textured walls, floors and ceilings, a scripted camera, at any --size.
 
 Everything runs as vectors whose lanes are screen columns (no per-column units):
 
@@ -19,6 +19,12 @@ Everything runs as vectors whose lanes are screen columns (no per-column units):
             a shift by 4 (v & 7) puts the texel in the top nibble, and one decider per texel value
             copies its color bus. Out-of-wall rows (|V| >= 2 tex) get a word of all 1s, the
             floor/ceiling marker.
+  flats     per row, the floor (or ceiling) point under each column is P + (H / |r|) * ray: its
+            position within the tile times 2^32 is RAW * K_y + (P << 24) per axis (int32 products
+            wrap, dropping the whole tiles). Deciders on its top bits pick a word of 8 packed flat
+            texels, a shift picks the texel, and one decider per flat color, where the wall's texel
+            is 15, outputs that color at the row's brightness (constant: the distance is H / |r|).
+            Runs beside the march, so it adds no latency.
 
 Lanes vanish when a value is 0, which would silently drop columns. Every vector that might hit 0
 is combined lane-wise with one that is nonzero on every lane, or read by a decider that also
@@ -79,6 +85,9 @@ BRIGHT = 17 * FOG            # brightness = BRIGHT / (D + FOG) <= 17; texture ch
 NEG = 4 * len(MAP)           # line base of map keys for rays going - (keys grow with distance)
 COLORS = 14                  # texels 1..14 per texture; 15 marks floor / ceiling
 DEFAULT_TEX = 64             # texture resolution (texels per tile, both ways)
+FLAT_OF = {"floor": "FLOOR4_8", "ceiling": "TLITE6_4"}   # Freedoom flats, one per tile
+FLAT_COLORS = 16             # flat texels 0..15
+DEFAULT_FLAT = 16            # flat resolution (texels per tile, both ways); 0 = untextured
 
 
 def pack(rgb):
@@ -214,15 +223,59 @@ def strip_word(texels, u, j):
     return sem.i32(sum(texels[8 * j + n][u] << (28 - 4 * n) for n in range(8)))
 
 
-def nibble_range(t):
-    """Conditions: the top nibble of Each (signed) is t."""
-    lo, hi = (t << 28, (t + 1) << 28) if t < 8 else ((t - 16) << 28, (t - 15) << 28)
+def top_range(t, bits, wire=RED, first=None):
+    """Conditions: the top `bits` bits of Each (on wire) are t, as one signed range. first: the
+    connector of the first condition ("and" when appended to others)."""
+    lo = sem.i32(t << (32 - bits))
+    hi = lo + (1 << (32 - bits))
     conds = []
     if lo > -(1 << 31):
-        conds.append(sem.cond(EACH, ">=", lo, RED))
+        conds.append(sem.cond(EACH, ">=", lo, wire, first))
     if hi < (1 << 31):
-        conds.append(sem.cond(EACH, "<", hi, RED, "and" if conds else None))
+        conds.append(sem.cond(EACH, "<", hi, wire, "and" if conds else first))
     return conds
+
+
+def nibble_range(t, wire=RED, first=None):
+    """Conditions: the top nibble of Each (signed) is t."""
+    return top_range(t, 4, wire, first)
+
+
+# Flats (floor and ceiling): one flat per tile, box-filtered from 64x64 to f x f texels and quantized
+# to FLAT_COLORS colors. A floor pixel's world position is P + (H / |r|) * ray (r = 2y + 1 - H),
+# kept as its position within the tile times 2^32 (int32 products wrap, which drops the tile).
+
+def load_flats(f):
+    if f not in (8, 16, 32):
+        raise SystemExit(f"flat resolution {f}: must be 8, 16 or 32 (or 0 for untextured)")
+    data = json.loads(TEXTURES.read_text())
+    pal = data["palette"]
+    out = {}
+    for part, name in FLAT_OF.items():
+        rows, s = data["flats"][name], 64 // f
+        px = [tuple(round(sum(pal[rows[yy][xx]][c] for yy in range(v * s, v * s + s) for xx in range(u * s, u * s + s))
+                          / (s * s)) for c in range(3)) for v in range(f) for u in range(f)]
+        centers = quantize(px, FLAT_COLORS)
+        texels = [[nearest(centers, px[v * f + u]) for u in range(f)] for v in range(f)]
+        c4 = [tuple(min(15, round(x / 17)) for x in c) for c in centers]
+        out[part] = {"name": name, "texels": texels, "c4": c4}
+    return out
+
+
+def flat_word(texels, v, j):
+    """Texels u = 8j .. 8j + 7 of flat row v, texel 8j + n at bits 28 - 4n."""
+    return sem.i32(sum(texels[v][8 * j + n] << (28 - 4 * n) for n in range(8)))
+
+
+def row_scale(y, h):
+    """Flat sampling for screen row y: K with ray * K = the floor offset in 2^-32 tiles (RAW has
+    the ray at 2^20), and the brightness at that distance (h / |r| tiles)."""
+    r = abs(2 * y + 1 - h)
+    return round(h * (1 << 12) / r), BRIGHT // (h * DS // r + FOG)
+
+
+def flat_color(c4, br):
+    return (pack(c4) * br) or 1
 
 
 def scripted_camera(g):
@@ -252,7 +305,34 @@ def slot_columns(n, hole, x_right=-2):
     return xs
 
 
-def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX):
+def row_slots(nw, words, flats):
+    """Slot names of a row pipeline, left to right. Each row-local network (below) must have its
+    members within wire reach of each other, so the wall chain is interleaved into the end of
+    the flat word deciders."""
+    mux = [f"mux{j}" for j in range(nw)]
+    pals = [f"pal{c}" for c in range(1, COLORS + 1)]
+    if not flats:
+        return ["v", "bg"] + mux + ["S", "shift", "pal15"] + pals
+    pre, a = ["v", "bg"] + mux[:-1], words[:-1]
+    k = min(len(pre), len(a))
+    mid = a[:len(a) - k] + pre[:len(pre) - k] + [x for pair in zip(a[len(a) - k:], pre[len(pre) - k:]) for x in pair]
+    return (["px", "py", "fx", "fy"] + mid + [words[-1], "sf1", "wd", mux[-1], "sf", "S", "tf", "shift"]
+            + [f"fpal{c}" for c in range(FLAT_COLORS)] + pals)
+
+
+def row_nets(nw, words, flats):
+    """Networks within one row (lists of slot names) for the reach check."""
+    mux = [f"mux{j}" for j in range(nw)]
+    pals = [f"pal{c}" for c in range(1, COLORS + 1)] + (["pal15"] if not flats else [])
+    fpals = [f"fpal{c}" for c in range(FLAT_COLORS)] if flats else []
+    nets = [["v", "bg"] + mux + ["S"], mux + ["bg", "shift"], ["S", "shift"], ["shift"] + fpals + pals, fpals + pals]
+    if flats:
+        nets += [["px", "fx"], ["py", "fy"], ["fx", "sf1"] + words, ["fy"] + words, words + ["wd"], ["sf1", "sf"],
+                 ["wd", "tf"], ["sf", "tf"], ["tf"] + fpals]
+    return nets
+
+
+def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX, flat=DEFAULT_FLAT):
     """camera(g) -> (A, PX, PY, extra scalars): view angle 0..255 and an odd position (1/FP
     tiles) as scalars of g. extra may hold "angle_offset", added to A by the tables.
 
@@ -268,6 +348,7 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
     assert all(camx)
     textures = load_textures(tex)
     NT, nw = len(textures), tex // 8
+    flats = load_flats(flat) if flat else None
 
     # -- scalars: the camera vectors come straight out of signed lookups keyed by the view angle.
     A, PX, PY, extra = camera(g)
@@ -387,9 +468,9 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
     # so the words come out one tick after the split. Fixed block below the rows.
     words = [[] for _ in range(nw)]
     for j in range(nw):
-        for side, TK, MS in sides:
-            for ty, t in enumerate(textures):
-                for u in range(tex):
+        for ty, t in enumerate(textures):
+            for u in range(tex):
+                for side, TK, MS in sides:   # sides alternate, so each side's networks stay contiguous in the block
                     words[j].append(g.decider(
                         [sem.cond(EACH, "=", ((ty + 1) << 12) + u * ustep, RED), sem.cond(EACH, ">", 0, GREEN, "and")],
                         [sem.out(EACH, constant=strip_word(t["texels"], u, j))], red=TK, green=MS,
@@ -409,9 +490,20 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
 
     # -- rows. Texel row v = tex/2 + r * tex * D / (H * 2^16) for r = 2y + 1 - H, kept as
     # V = 4 (v - tex/2) = D / c_y: one division per row. The wall covers |V| < 2 tex.
-    names = ["v", "bg"] + [f"mux{j}" for j in range(nw)] + ["S", "shift"] + [f"pal{c}" for c in [15] + list(pal)]
+    #
+    # Flats: the pixel's position within its tile, times 2^32: F = RAW * K_y + (P << 24) per axis
+    # (products wrap). Its top fb bits are the flat texel (u from X, v from Y); one decider per
+    # word (flat row v, u >> 3) outputs 8 packed texels, and Sf = (FX >> (30 - fb)) AND 28 picks
+    # the texel. Floor pixels are where the wall's texel is 15; one decider per flat color there.
+    fb = flat.bit_length() - 1 if flat else 0
+    words_of = [f"w{v}.{j}" for v in range(flat) for j in range(flat // 8)] if flat else []
+    names = row_slots(nw, words_of, flat)
     xs = slot_columns(len(names), hole)
     X = dict(zip(reversed(names), xs))
+    if flat:
+        sums = [g.op("arith", sem.arith_spec(EACH, "+", 0, EACH, RED), red=raw, label=f"raw {a}")
+                for a, raw in (("x", RAWX), ("y", RAWY))]
+        Ps = [g.ss(P, "<<", 24, f"frac {a}") for a, P in (("x", PX), ("y", PY))]
     rows, palettes = [], []
     for y in range(h):
         r = 2 * y + 1 - h
@@ -424,27 +516,75 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
                        [sem.out(EACH, constant=-1)], red=V, label=f"bg{y}")
         S = g.vc(V, "AND", 28, f"nibble{y}")
         T = g.vv(mux + [bg], "<<", S, f"texel{y}")
-        pals = [g.decider(nibble_range(15), [sem.out(EACH, constant=pack(background(y, h)))], red=T, label=f"floor{y}")]
-        pals += [g.decider(nibble_range(c), [sem.out(EACH, networks=GREEN)], red=T, green=CT[c], label=f"pal{y}.{c}")
-                 for c in pal]
-        for name, n in zip(["v", "bg"] + [f"mux{j}" for j in range(nw)] + ["S", "shift"] + [f"pal{c}" for c in [15] + list(pal)],
-                           [V, bg] + mux + [S, T] + pals):
+        node = {"v": V, "bg": bg, "S": S, "shift": T, **{f"mux{j}": m for j, m in enumerate(mux)}}
+        pals = [g.decider(nibble_range(c), [sem.out(EACH, networks=GREEN)], red=T, green=CT[c], label=f"pal{y}.{c}")
+                for c in pal]
+        node.update({f"pal{c}": n for c, n in zip(pal, pals)})
+        if not flat:
+            fl = g.decider(nibble_range(15), [sem.out(EACH, constant=pack(background(y, h)))], red=T, label=f"floor{y}")
+            node["pal15"] = fl
+            pals = [fl] + pals
+        else:
+            part = flats["floor" if r > 0 else "ceiling"]
+            ky, br = row_scale(y, h)
+            # The raw rays, delayed so the flat texel lands with the wall's.
+            at = T.time - 5
+            if sums[0].time > at:
+                raise ValueError("flat path too long for the row stage")
+            RX, RY = (g.delay(n, at - n.time) for n in sums)
+            pxy = [g.vc(RX, "*", ky, f"fx{y}*"), g.vc(RY, "*", ky, f"fy{y}*")]
+            FX, FY = (g.vs(n, "+", P, f"f{a}{y}") for n, P, a in zip(pxy, Ps, "xy"))
+            node.update({"px": pxy[0], "py": pxy[1], "fx": FX, "fy": FY})
+            ws = []
+            for v in range(flat):
+                for j in range(flat // 8):
+                    word = flat_word(part["texels"], v, j)
+                    if not word:
+                        continue
+                    conds = top_range(j, fb - 3, RED) if fb > 3 else []
+                    conds += top_range(v, fb, GREEN, "and" if conds else None)
+                    n = g.decider(conds, [sem.out(EACH, constant=word)], red=FX, green=FY, label=f"flat{y}.{v}.{j}")
+                    ws.append(n)
+                    node[f"w{v}.{j}"] = n
+            node["sf1"] = g.vc(FX, ">>", 30 - fb, f"fu{y}")
+            node["sf"] = g.vc(node["sf1"], "AND", 28, f"fs{y}")
+            node["wd"] = g.op("arith", sem.arith_spec(EACH, "+", 0, EACH, RED), red=ws, label=f"fword{y}")
+            node["tf"] = Tf = g.vv(node["wd"], "<<", node["sf"], f"ftexel{y}")
+            fpals = []
+            for c, c4 in enumerate(part["c4"]):
+                n = g.decider(nibble_range(15) + nibble_range(c, GREEN, "and"), [sem.out(EACH, constant=flat_color(c4, br))],
+                              red=T, green=Tf, label=f"fpal{y}.{c}")
+                node[f"fpal{c}"] = n
+                fpals.append(n)
+            pals = fpals + pals
+        for name, n in node.items():
             n.fixed, n.pos = True, (X[name], y)
         rows.append(Collect(pals))
         palettes.append(pals)
+        check_row_reach(X, node, nw, words_of, flat)
     # Color buses: the product and its alignment delay above their palette column.
     for c, n in CT.items():
         n.fixed, n.pos = True, (X[f"pal{c}"], -2)
         d = g.delay(n, 1)
         d.fixed, d.pos = True, (X[f"pal{c}"], -1)
     # The strip block: below the rows, filled column by column (word by word).
-    flat = [n for ws in words for n in ws]
+    block = [n for ws in words for n in ws]
     block_cols = sorted(xs)
-    per_col = -(-len(flat) // len(block_cols))
-    for i, n in enumerate(flat):
+    per_col = -(-len(block) // len(block_cols))
+    for i, n in enumerate(block):
         n.fixed, n.pos = True, (block_cols[i // per_col], h + 2 + i % per_col)
-    layout = {"x_right": min(xs) - 4, "palettes": palettes, "textures": textures, "tex": tex}
+    layout = {"x_right": min(xs) - 4, "palettes": palettes, "textures": textures, "tex": tex, "flats": flats,
+              "flat": flat}
     return g, cols, rows, {**extra, "A": A, "PX": PX, "PY": PY, "tables": tabs}, layout
+
+
+def check_row_reach(X, node, nw, words, flats):
+    """Every row-local network's members, in x order, within wire reach (combinators are 2 wide)."""
+    for net in row_nets(nw, words, flats):
+        xs = sorted(X[n] for n in net if n in node)
+        for a, b in zip(xs, xs[1:]):
+            if b - a - 2 > 9:
+                raise ValueError(f"row slots out of reach: {net} ({a} -> {b})")
 
 
 def wire_screen(b, ent, cols, layout, w, h):
@@ -459,12 +599,12 @@ def wire_screen(b, ent, cols, layout, w, h):
         b.chain(lamps, 1)
 
 
-def build(w, h, substation_quality=DEFAULT_SUBSTATION_QUALITY, tex=DEFAULT_TEX):
+def build(w, h, substation_quality=DEFAULT_SUBSTATION_QUALITY, tex=DEFAULT_TEX, flat=DEFAULT_FLAT):
     if w > len(LANE_SIGNALS):
         raise SystemExit(f"width {w} needs {w} lane signals, only {len(LANE_SIGNALS)}")
     b = Blueprint(f"Raycaster M3 {w}x{h}", substation_quality)
     lattice = b.grid.hole
-    g, cols, rows, scal, layout = build_graph(w, h, hole=lattice, tex=tex)
+    g, cols, rows, scal, layout = build_graph(w, h, hole=lattice, tex=tex, flat=flat)
     ent = g.compile(b, blocked=lattice, region=lambda x, y: x <= -2, x_right=layout["x_right"])
     wire_screen(b, ent, cols, layout, w, h)
     _substations(b)
@@ -503,13 +643,21 @@ def ideal(g, scal, layout, w, h, T):
     check for the fixed-point math (not expected to match every pixel)."""
     vals = {k: g.evaluate(T, [scal[k].node])[0].get(sem.key(scal[k].signal), 0) for k in ("A", "PX", "PY")}
     vals.update(scal["tables"][vals["A"]])
-    tex, textures, types = layout["tex"], layout["textures"], wall_types()
+    tex, textures, types, flats, f = layout["tex"], layout["textures"], wall_types(), layout["flats"], layout["flat"]
     px, py = vals["PX"] / FP, vals["PY"] / FP
     img = [[pack(background(y, h))] * w for y in range(h)]
     for c in range(w):
         camx = ((2 * c + 1 - w) * 1024 // w) / 1024
         rdx = (vals["DX"] + vals["PLX"] * camx) / 1024
         rdy = (vals["DY"] + vals["PLY"] * camx) / 1024
+        if flats:
+            for y in range(h):
+                r = 2 * y + 1 - h
+                d = h / abs(r)
+                fx, fy = px + d * rdx, py + d * rdy
+                u, v = int((fx - math.floor(fx)) * f), int((fy - math.floor(fy)) * f)
+                part = flats["floor" if r > 0 else "ceiling"]
+                img[y][c] = flat_color(part["c4"][part["texels"][v][u]], row_scale(y, h)[1])
         mx, my = int(px), int(py)
         ddx = abs(1 / rdx) if rdx else 1e30
         ddy = abs(1 / rdy) if rdy else 1e30
@@ -588,10 +736,12 @@ def main():
     ap.add_argument("--verify", action="store_true")
     ap.add_argument("--every", type=int, default=5, help="check every n-th frame against the evaluation")
     ap.add_argument("--tex", type=int, default=DEFAULT_TEX, help="texture resolution (texels per tile)")
+    ap.add_argument("--flat", type=int, default=DEFAULT_FLAT,
+                    help="floor/ceiling texture resolution (texels per tile: 8, 16, 32; 0 = untextured)")
     quality_arg(ap)
     a = ap.parse_args()
     w, h = map(int, a.size.lower().split("x"))
-    g, b, cols, rows, scal, layout = build(w, h, a.substation_quality, a.tex)
+    g, b, cols, rows, scal, layout = build(w, h, a.substation_quality, a.tex, a.flat)
     data = b.to_json()
     data["fsim"] = {"ticks": a.ticks, "doc": f"raycaster M3 {w}x{h}"}
     gen = HERE / "gen"

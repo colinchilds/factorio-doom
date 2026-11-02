@@ -56,11 +56,12 @@ is what makes this look feasible now.
 
 ## Renderer architecture
 
-M3 (Freedoom-textured walls) is built and verified; see "Raycaster" below. The original plan
-had one column unit (~20 combinators) per screen column. The built design is far smaller: **the
-whole ray march is vector ops with lanes = screen columns** (about 700 combinators at any
-width), plus a fixed texture lookup block (2 × types × tex × tex/8 deciders, 4,096 for 4
-textures at 64) and 27 combinators per screen row.
+M3 (Freedoom-textured walls, floors and ceilings) is built and verified; see "Raycaster" below.
+The original plan had one column unit (~20 combinators) per screen column. The built design is
+far smaller: **the whole ray march is vector ops with lanes = screen columns** (about 700
+combinators at any width), plus a fixed texture lookup block (2 × types × tex × tex/8 deciders,
+4,096 for 4 textures at 64) and 27 combinators per screen row for walls, plus about 55 per row
+for textured floors and ceilings (flat 16).
 
 ```
 Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► split ─► texture ─► row pipelines ─► lamps
@@ -132,7 +133,27 @@ Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► sp
      wall → `Each = -1`.
    - `T = word << (V AND 28)`: the texel is in the top nibble (all 1s = floor/ceiling).
    - Palette: one decider per texel value, a range test on the top nibble (signed) → copy `C_t`;
-     nibble 15 → the row's floor/ceiling color.
+     nibble 15 → the floor/ceiling (below, or the row's flat color with `--flat 0`).
+6. **Flats (floor and ceiling)**, in the same row pipeline (`--flat`, texels per tile: 8, 16 or
+   32; default 16; 0 = a flat color per row). Freedoom flats FLOOR4_8 and TLITE6_4, one per tile,
+   quantized to 16 colors.
+   - Row y shows the floor (r = 2y + 1 − H > 0) or ceiling at distance H / |r| tiles, the same
+     for every column. So per row, per axis: `F = RAW * K_y + (P << 24)` with `K_y = round(H *
+     2^12 / |r|)` is the pixel's **position within its tile times 2^32**. The product wraps
+     (int32), which drops the whole tiles for free; it means one flat for the whole map.
+     `P << 24` is added with `Each + scalar` (a broadcast would need a W-lane constant per row).
+   - Its top fb bits are the texel: one decider per word (flat row v from FY, u >> 3 from FX;
+     32 at flat 16, `top_range`) outputs 8 packed texels. `Sf = (FX >> (30 − fb)) AND 28` picks
+     the texel (two ops: the shift amount's 5 bits include 2 sub-texel bits), so the words wait
+     one tick in a single `Each + 0` (they sum on one wire).
+   - Palette: one decider per flat color, `wall texel = 15 AND flat texel = c` → that color times
+     the row's brightness (a constant, since the row's distance is). An absent flat lane reads 0,
+     which is color 0, so zero words need no decider.
+   - It starts from RAW delayed to land with the wall texel, so it adds no latency.
+   - **Layout:** a row's networks must stay within reach of each other in its strip of slots, so
+     the wall chain is interleaved into the end of the word deciders (`row_slots`, checked by
+     `check_row_reach`). The strip block below alternates sides so each side's networks stay
+     contiguous (with 82 slot columns it is only about 50 deep).
 
 Still to come (M4+): sprites and the rest below.
 
@@ -338,15 +359,18 @@ any `--size`. It proves the texture path planned above:
 
 ### Raycaster (`demos/raycast.py`): M1 2026-11-01, M3 textures 2026-11-01
 
-Freedoom-textured walls (M1: flat-shaded), a floor/ceiling gradient, 16×16 original map, the
-camera circling and turning on a script. Built with the netlist compiler at any `--size`.
+Freedoom-textured walls (M1: flat-shaded), textured floor and ceiling (`--flat 0`: a gradient),
+16×16 original map, the camera circling and turning on a script. Built with the netlist compiler at any `--size`.
 - **Map and textures:** wall characters pick textures (`TEXTURE_OF`): `#` STARTAN3, `B` BRICK7,
   `M` MARBLE1, `R` SP_HOT1, from `assets/freedoom/textures.json` (`tools/wad.py
   --export-textures`; it also has STONE2 and WOOD1). A tile is 128×128 texture units,
-  box-filtered to `--tex` (default 64) texels each way.
-- **Size:** 5,847 / 7,473 / 10,175 combinators at 64×40 / 160×100 / 320×200 (M1: 464 / 530 /
-  632), plus lamps and about 600–750 relay poles. Of those, 4,096 are strip lookups (4 textures
-  at tex 64) and 27 per row. A new frame every tick.
+  box-filtered to `--tex` (default 64) texels each way. Flats (`FLAT_OF`): FLOOR4_8 floor,
+  TLITE6_4 ceiling (a light panel per tile; CEIL3_5 was too dark to read), `--flat` (default 16)
+  texels per tile.
+- **Size:** about 8,100 / 13,000 / 21,200 combinators at 64×40 / 160×100 / 320×200 (flat 0:
+  5,847 / 7,473 / 10,175; M1: 464 / 530 / 632), plus lamps and about 900–1,000 relay poles.
+  Of those, 4,096 are strip lookups (4 textures at tex 64), 27 per row for walls and about 55
+  per row for flats (32 word deciders, 16 palette deciders). A new frame every tick.
 - **Latency:** 17 ticks from the camera port with the game's camera (M1 16; 23 before the setup
   rework, 42 before the parallel march); the scripted camera adds its own path.
 - **Checks:**
@@ -431,11 +455,11 @@ right, then the player logic below the pad.
 - **Checks (with M3 textures):**
   - `--verify`: REG matches the reference on every tick, the player box never touches a wall,
     and sampled frames match the raycaster evaluation, at 64×40, 160×100 and 320×200.
-  - The 64×40 build (normal substations) matches the game on 3,367,999 checks
-    (`harness/run.py --warmup 60`, scripted inserts, 400 ticks; about 2 minutes, a 750 MB dump).
-    M2 matched on 1,209,416.
-  - 160×100 and 320×200 import in Space Age, fully powered, at 0.59 and 1.16 ms per tick (M2:
-    0.40 and 0.88). Blueprint strings 0.6 and 1.9 MB.
+  - The 64×40 build (normal substations) matches the game on 4,263,031 checks with flats
+    (`harness/run.py --warmup 60`, scripted inserts, 400 ticks; about 3 minutes and a 1 GB dump).
+    Without flats it matched on 3,367,999, and M2 on 1,209,416.
+  - 160×100 and 320×200 import in Space Age, fully powered, at 0.78 and 1.40 ms per tick (without
+    flats 0.59 and 1.16; M2: 0.40 and 0.88). Blueprint strings 0.9 and 2.4 MB.
 - **Input-to-screen latency:** about 22 ticks (0.37 s) for both turning and walking: pad 3,
   gate or turn decider into REG 2, raycaster 17 with the lamps.
   - **History:** about 56 ticks at first (the user felt "almost a full second"), then 27 for
@@ -477,7 +501,7 @@ Done:
 - Screen size decided (160×100, aiming for 320×200), and M0 UPS measurements: 320×200 fits.
 - Freedoom sprite assets and the sprite demo (above): the texture path works end to end in fsim
   at three sizes and in the game.
-- The netlist compiler and the raycaster (above): M1 flat walls, then M3 Freedoom textures,
+- The netlist compiler and the raycaster (above): M1 flat walls, then M3 Freedoom textures (walls, floors, ceilings),
   driven by the pad in the game build.
 
 Commit only when the user asks.
@@ -486,11 +510,12 @@ Commit only when the user asks.
 
 1. **M4:** sprites, enemies, shooting, HUD, doors. Sprites need a per-column depth buffer: D
    is on `[MV, MH]` already. M5 (stretch): angled walls, varying heights.
-2. **Possible M3 follow-ups:** fix the mirrored faces; textured floor/ceiling (needs per-pixel
-   world positions, far more expensive than walls); fewer strip deciders (they are 4,096 of the
-   ~7,500 combinators at 160×100).
+2. **Possible M3 follow-ups:** fix the mirrored faces; fewer strip deciders (4,096 of the
+   ~13,000 combinators at 160×100); different flats per room (needs the map cell per pixel, which
+   the wrapping product throws away); a lower-cost flat path (the 32 word deciders per row are
+   most of it).
 3. **Tooling as needed:** fsim speed for 320×200 work (about 70 ms per tick for the textured
-   game; lookups are about 100× slower than the game).
+   game without flats; lookups are about 100× slower than the game).
 
 ## Rules for working here
 

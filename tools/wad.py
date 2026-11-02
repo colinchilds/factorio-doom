@@ -43,6 +43,19 @@ class Wad:
         end = names.index("S_END", start)
         return names[start + 1:end]
 
+    def flat_names(self):
+        names = [n for n, _, _ in self.lumps]
+        start = max(i for i, n in enumerate(names) if n in ("F_START", "FF_START"))
+        end = names.index("F_END", start)
+        return [n for n in names[start + 1:end] if not n.endswith("_START") and not n.endswith("_END")]
+
+    def flat(self, name):
+        """A floor/ceiling flat: 64x64 palette indexes, rows[y][x]."""
+        d = self.lump(name)
+        if len(d) < 4096:
+            raise ValueError(f"{name}: not a flat")
+        return [list(d[64 * y:64 * y + 64]) for y in range(64)]
+
     def texture_defs(self):
         """TEXTURE1/TEXTURE2 (Doom format): {name: (width, height, [(x, y, patch name), ...])}."""
         pd = self.lump("PNAMES")
@@ -131,6 +144,23 @@ def main():
         for n in sys.argv[4:]:
             w, h, rows = wad.texture(n)
             out["textures"][n] = {"width": w, "height": h, "rows": [[-1 if i is None else i for i in r] for r in rows]}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(out, separators=(",", ":")) + "\n")
+    elif sys.argv[2] == "--flats":
+        for n in wad.flat_names():
+            if n.startswith(sys.argv[3] if len(sys.argv) > 3 else ""):
+                print(n)
+    elif sys.argv[2] == "--flat-png":
+        out = pathlib.Path(sys.argv[3])
+        out.mkdir(parents=True, exist_ok=True)
+        for n in sys.argv[4:]:
+            write_png(out / f"{n}.png", [[(*wad.palette[i], 255) for i in r] for r in wad.flat(n)])
+    elif sys.argv[2] == "--export-flats":
+        path = pathlib.Path(sys.argv[3])
+        out = json.loads(path.read_text()) if path.exists() else {"palette": [list(c) for c in wad.palette]}
+        out.setdefault("flats", {})
+        for n in sys.argv[4:]:
+            out["flats"][n] = wad.flat(n)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(out, separators=(",", ":")) + "\n")
     elif sys.argv[2] == "--png":

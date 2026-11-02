@@ -19,8 +19,8 @@ The tools so far:
 - **Sprite demo** (`demos/sprite.py`): a Freedoom monster (BSD-licensed art, `assets/freedoom/`)
   walking toward the camera, drawn by combinators at any `--size`. The `.txt` file it writes is a
   blueprint string to paste into the game.
-- **Raycaster** (`demos/raycast.py`): M3, Freedoom-textured walls rendered entirely by
-  combinators at any `--size` (about 7,500 at 160×100), built with the netlist compiler
+- **Raycaster** (`demos/raycast.py`): M3, Freedoom-textured walls, floors and ceilings rendered
+  entirely by combinators at any `--size` (about 13,000 at 160×100), built with the netlist compiler
   (`compiler/`), which balances latency, places and wires the circuit, and evaluates it as the
   reference.
 - **The game** (`demos/game.py`): the raycaster driven by a chest input pad (god mode, drop
@@ -57,6 +57,7 @@ python3 harness/run.py --bench 300 bench/gen/*_160x100.json -o bench/m0_160x100.
 # Raycaster (M3: Freedoom-textured walls): generate, check sampled frames against the evaluation
 python3 demos/raycast.py --size 160x100 --verify   # -> demos/gen/raycast_160x100.{json,txt}
 python3 demos/raycast.py --size 64x40 --tex 32 --verify --every 1   # smaller textures, every frame
+python3 demos/raycast.py --size 160x100 --flat 0   # untextured floor/ceiling (cheaper); --flat 8/16/32
 python3 harness/run.py --warmup 60 out/dir -o dump.json   # deep pipelines: settle before t0
 # Substations default to legendary (28x28 supply, fewer dead pixels). Game checks without the
 # DLC need normal ones; with the DLC: harness/run.py --dlc --bench 30 demos/gen/raycast_160x100.json
@@ -66,7 +67,7 @@ python3 demos/raycast.py --size 64x40 --substation-quality normal
 python3 demos/input_pad.py --size 320x200 --verify   # -> demos/gen/input_pad_n9.{json,txt}
 ./target/release/fsim run demos/gen/input_pad_n9.json --input inserts.json --probe 12  # [[tick, entity, item, count]]
 
-# The game (M2 movement + M3 textures): the raycaster driven by the pad (walk, turn, collide);
+# The game (M2 movement + M3 textured walls, floors, ceilings): the raycaster driven by the pad (walk, turn, collide);
 # player state vs reference, frames
 python3 demos/game.py --size 160x100 --verify      # -> demos/gen/game_160x100.{json,txt}
 
@@ -76,6 +77,7 @@ python3 demos/sprite.py --size 160x100 --verify    # -> demos/gen/sprite_160x100
 ./target/release/fsim run demos/gen/sprite_160x100.json --ppm out/ppm   # raw frames for scripts
 python3 tools/wad.py freedoom2.wad --list TROO     # sprites in a WAD (see assets/freedoom/)
 python3 tools/wad.py freedoom2.wad --textures BRICK  # wall textures; --texture-png DIR NAME... previews
+python3 tools/wad.py freedoom2.wad --flats FLOOR     # floor/ceiling flats; --flat-png DIR NAME... previews
 
 python3 harness/run.py --dlc --bench 30 demos/gen/sprite_160x100.json   # imports in Space Age?
 python3 harness/run.py --lanes                    # refresh conformance/lane_signals.json

@@ -160,7 +160,7 @@ def big_pole_line(b, points):
 
 
 def build(w, h, n=None, hold=input_pad.DEFAULT_HOLD, substation_quality=DEFAULT_SUBSTATION_QUALITY,
-          tex=raycast.DEFAULT_TEX):
+          tex=raycast.DEFAULT_TEX, flat=raycast.DEFAULT_FLAT):
     n = n or input_pad.button_size(h)
     b = Blueprint(f"Factorio Doom M3 {w}x{h}", substation_quality)
     lattice = b.grid.hole
@@ -198,7 +198,7 @@ def build(w, h, n=None, hold=input_pad.DEFAULT_HOLD, substation_quality=DEFAULT_
     port_pos = (-4, -6)
     port = b.pole(*port_pos)
     gr, cols, rows, scal, layout = raycast.build_graph(w, h, camera_from(port, port_pos), Graph(reserved=[SX, SY, SR]),
-                                                       hole=lattice, tex=tex)
+                                                       hole=lattice, tex=tex, flat=flat)
     ent_r = gr.compile(b, blocked=lattice, region=lambda x, y: x <= -2, x_right=layout["x_right"])
     raycast.wire_screen(b, ent_r, cols, layout, w, h)
 
@@ -329,10 +329,12 @@ def main():
     ap.add_argument("--ticks", type=int, default=700)
     ap.add_argument("--verify", action="store_true")
     ap.add_argument("--tex", type=int, default=raycast.DEFAULT_TEX, help="texture resolution (texels per tile)")
+    ap.add_argument("--flat", type=int, default=raycast.DEFAULT_FLAT,
+                    help="floor/ceiling texture resolution (texels per tile: 8, 16, 32; 0 = untextured)")
     quality_arg(ap)
     a = ap.parse_args()
     w, h = map(int, a.size.lower().split("x"))
-    b, pad, g, nodes, gr, cols, rows, scal, lat, probe = build(w, h, a.button_size, a.hold, a.substation_quality, a.tex)
+    b, pad, g, nodes, gr, cols, rows, scal, lat, probe = build(w, h, a.button_size, a.hold, a.substation_quality, a.tex, a.flat)
     inserts = schedule(pad, a.ticks)
     data = b.to_json()
     data["fsim"] = {"ticks": a.ticks, "doc": f"M3 {w}x{h}", "inserts": inserts}
