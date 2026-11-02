@@ -5,7 +5,8 @@ the D-pad, turn, slide along walls.
 
 Player state is one register, REG: an arithmetic combinator `Each + 0` that adds its own output
 (green loop) to the increments on its red input. It holds X and Y (displacement from SPAWN, 1/FP
-tiles) and R (turn, 256 per revolution, unbounded; the view angle is (R + A0) & 255).
+tiles) and R (turn, 1024 per revolution, unbounded; the view angle is ((R >> 2) + A0) & 255,
+with the >> 2 folded into the lookup tables keyed on R & 1023).
 
 Player logic (a netlist graph, ext inputs REG and the pad's HELD network). Nothing on the input
 path waits for collision; from REG, every tick, whatever is held (lat = 2 ticks behind REG):
@@ -50,7 +51,10 @@ SX, SY, SR = sig("signal-X"), sig("signal-Y"), sig("signal-R")
 SPAWN = (int(8.5 * FP), int(12.5 * FP))
 A0 = 192           # spawn facing north (angle 0 is east, angles grow clockwise on screen)
 SPEED = 10         # 1/FP tiles per tick while walking: 2.3 tiles a second
-TURN = 2           # angle units per tick: a turn in 2.1 seconds
+ANGLE_SUB = 2      # R counts 2^ANGLE_SUB steps per view angle: 1024 per revolution
+DEFAULT_TURN = 3   # R steps per tick while turning: a turn in 5.7 seconds (8 was 2.1 s; user
+                   # found that too stiff, 2026-11-01)
+AMASK = (256 << ANGLE_SUB) - 1
 MARGIN = 48        # player box half-size (1/FP tiles), before the latency allowance
 
 
@@ -59,8 +63,8 @@ def walls():
 
 
 def velocity(a, fw=1):
-    """Per-tick step (vx, vy) for lookup key a = R & 255, walking forward (fw 1) or back (-1)."""
-    t = 2 * math.pi * ((a + A0) % 256) / 256
+    """Per-tick step (vx, vy) for lookup key a = R & AMASK, walking forward (fw 1) or back (-1)."""
+    t = 2 * math.pi * (((a >> ANGLE_SUB) + A0) % 256) / 256
     return round(SPEED * math.cos(t)) * fw, round(SPEED * math.sin(t)) * fw
 
 
@@ -75,12 +79,12 @@ def wall_runs():
     return runs
 
 
-def player_graph(reg, reg_pos, held, held_pos, gate_pos, turn_pos, box):
+def player_graph(reg, reg_pos, held, held_pos, gate_pos, turn_pos, box, turn_rate=DEFAULT_TURN):
     """The player logic. Returns (graph, nodes) with nodes S, H (ext), gates and turn (fixed
     sinks feeding REG), and lat: how many ticks the gates' REG-derived inputs run behind REG.
 
     Nothing on the input path waits for collision. From REG, every tick and whatever is held:
-      V+, V-   the step forward and back for the current angle (signed lookups on R & 255);
+      V+, V-   the step forward and back for the current angle (signed lookups on R & AMASK);
       corners  for each corner of the player's box (half-size `box`): is it in a wall? Range
                tests on X and Y straight from REG (one decider per corner).
     The gates then pass a step when its button is held and the box's two corners on that side are
@@ -91,13 +95,13 @@ def player_graph(reg, reg_pos, held, held_pos, gate_pos, turn_pos, box):
     S = g.ext(reg, reg_pos, label="REG")
     H = g.ext(held, held_pos, size=(1, 2), label="HELD")
     # Turning: straight from HELD into REG.
-    turn = [g.decider([sem.cond(sig(input_pad.RIGHT), ">", 0, RED)], [sem.out(SR, constant=TURN)], red=H, label="turn+"),
-            g.decider([sem.cond(sig(input_pad.LEFT), ">", 0, RED)], [sem.out(SR, constant=-TURN)], red=H, label="turn-")]
+    turn = [g.decider([sem.cond(sig(input_pad.RIGHT), ">", 0, RED)], [sem.out(SR, constant=turn_rate)], red=H, label="turn+"),
+            g.decider([sem.cond(sig(input_pad.LEFT), ">", 0, RED)], [sem.out(SR, constant=-turn_rate)], red=H, label="turn-")]
     for i, n in enumerate(turn):
         n.fixed, n.pos = True, (turn_pos[0], turn_pos[1] + i)
     X, Y, R = g.scalar(S, SX), g.scalar(S, SY), g.scalar(S, SR)
-    A = g.ss(R, "AND", 255, "angle")
-    V = {fw: [g.lookup_scalar(A, {a: velocity(a, fw)[i] for a in range(256)}, 32, f"v{fw:+d} {'xy'[i]}", out=s)
+    A = g.ss(R, "AND", AMASK, "angle")
+    V = {fw: [g.lookup_scalar(A, {a: velocity(a, fw)[i] for a in range(AMASK + 1)}, 32, f"v{fw:+d} {'xy'[i]}", out=s)
               for i, s in enumerate((SX, SY))] for fw in (1, -1)}
     # Corner (sx, sy) of the box is in a wall: X + SPAWN + sx*box in [256 x0, 256 (x1 + 1)) and the
     # same for Y, for some wall run.
@@ -136,10 +140,11 @@ def player_graph(reg, reg_pos, held, held_pos, gate_pos, turn_pos, box):
 def camera_from(port, port_pos):
     def camera(g):
         S = g.ext(port, port_pos, size=(1, 1), connectors=(1, 2), label="state port")
-        A = g.ss(g.scalar(S, SR), "AND", 255, "view angle")   # A0 is folded into the tables
-        PX = g.ss(g.ss(g.scalar(S, SX), "+", SPAWN[0]), "OR", 1, "px")
-        PY = g.ss(g.ss(g.scalar(S, SY), "+", SPAWN[1]), "OR", 1, "py")
-        return A, PX, PY, {"port": S, "angle_offset": A0}
+        A = g.ss(g.scalar(S, SR), "AND", AMASK, "view angle")   # A0 and >> ANGLE_SUB are in the tables
+        X0, Y0 = g.scalar(S, SX), g.scalar(S, SY)
+        PX = g.ss(g.ss(X0, "+", SPAWN[0]), "OR", 1, "px")
+        PY = g.ss(g.ss(Y0, "+", SPAWN[1]), "OR", 1, "py")
+        return A, PX, PY, {"port": S, "angle_offset": A0, "angle_sub": ANGLE_SUB, "pos0": (X0, Y0, SPAWN)}
     return camera
 
 
@@ -160,9 +165,10 @@ def big_pole_line(b, points):
 
 
 def build(w, h, n=None, hold=input_pad.DEFAULT_HOLD, substation_quality=DEFAULT_SUBSTATION_QUALITY,
-          tex=raycast.DEFAULT_TEX, flat=raycast.DEFAULT_FLAT):
+          tex=raycast.DEFAULT_TEX, flat=raycast.DEFAULT_FLAT, things=raycast.th.THINGS, turn=DEFAULT_TURN,
+          shade=None):
     n = n or input_pad.button_size(h)
-    b = Blueprint(f"Factorio Doom M3 {w}x{h}", substation_quality)
+    b = Blueprint(f"Factorio Doom M4 {w}x{h}", substation_quality)
     lattice = b.grid.hole
 
     # Pad right of the screen, player logic below it.
@@ -180,7 +186,7 @@ def build(w, h, n=None, hold=input_pad.DEFAULT_HOLD, substation_quality=DEFAULT_
     turn_pos = (reg_pos[0] + 2, reg_pos[1])
 
     def make(box):
-        return player_graph(reg, reg_pos, pad["d1"], held_pos, gate_pos, turn_pos, box)
+        return player_graph(reg, reg_pos, pad["d1"], held_pos, gate_pos, turn_pos, box, turn)
 
     g, nodes = make(MARGIN)
     lat = nodes["lat"]
@@ -198,7 +204,7 @@ def build(w, h, n=None, hold=input_pad.DEFAULT_HOLD, substation_quality=DEFAULT_
     port_pos = (-4, -6)
     port = b.pole(*port_pos)
     gr, cols, rows, scal, layout = raycast.build_graph(w, h, camera_from(port, port_pos), Graph(reserved=[SX, SY, SR]),
-                                                       hole=lattice, tex=tex, flat=flat)
+                                                       hole=lattice, tex=tex, flat=flat, things=things, shade=shade)
     ent_r = gr.compile(b, blocked=lattice, region=lambda x, y: x <= -2, x_right=layout["x_right"])
     raycast.wire_screen(b, ent_r, cols, layout, w, h)
 
@@ -331,13 +337,19 @@ def main():
     ap.add_argument("--tex", type=int, default=raycast.DEFAULT_TEX, help="texture resolution (texels per tile)")
     ap.add_argument("--flat", type=int, default=raycast.DEFAULT_FLAT,
                     help="floor/ceiling texture resolution (texels per tile: 8, 16, 32; 0 = untextured)")
+    ap.add_argument("--no-things", action="store_true", help="leave out the monsters and items")
+    ap.add_argument("--turn", type=int, default=DEFAULT_TURN,
+                    help=f"turn speed: 1/{1 << ANGLE_SUB} view angles (1/{256 << ANGLE_SUB} turn) per tick held")
     quality_arg(ap)
+    raycast.shading_args(ap)
     a = ap.parse_args()
     w, h = map(int, a.size.lower().split("x"))
-    b, pad, g, nodes, gr, cols, rows, scal, lat, probe = build(w, h, a.button_size, a.hold, a.substation_quality, a.tex, a.flat)
+    b, pad, g, nodes, gr, cols, rows, scal, lat, probe = build(w, h, a.button_size, a.hold, a.substation_quality, a.tex,
+                                                                a.flat, None if a.no_things else raycast.th.THINGS, a.turn,
+                                                                raycast.Shading.from_args(a))
     inserts = schedule(pad, a.ticks)
     data = b.to_json()
-    data["fsim"] = {"ticks": a.ticks, "doc": f"M3 {w}x{h}", "inserts": inserts}
+    data["fsim"] = {"ticks": a.ticks, "doc": f"M4 {w}x{h}", "inserts": inserts}
     gen = HERE / "gen"
     gen.mkdir(exist_ok=True)
     path = gen / f"game_{w}x{h}.json"

@@ -1,7 +1,9 @@
 # Freedoom sprites and textures
 
-`sprites.json` holds walk frames A–D (front view, rotation 1) of two Freedoom monsters, `TROO`
-and `POSS`, as palette indexes (-1 = transparent) with their offsets, plus PLAYPAL palette 0.
+`sprites.json` holds sprites as palette indexes (-1 = transparent) with their offsets, plus
+PLAYPAL palette 0: two Freedoom monsters, `TROO` and `POSS`, with their front-view walk (A–D),
+attack and pain frames and their death frames (rotation 0), and the items and decorations
+`BAR1A0`, `BAR1B0`, `MEDIA0`, `STIMA0`, `CLIPA0`, `ARM1A0` and `COLUA0`.
 
 `textures.json` holds six wall textures composed from their patches (TEXTURE1 + PNAMES):
 STARTAN3, BRICK7, MARBLE1, SP_HOT1, STONE2 and WOOD1, as palette indexes, plus the same palette.
@@ -16,6 +18,7 @@ FLOOR5_1, FLOOR7_1, TLITE6_4 and FLAT5_4.
   Freedoom is original art made as a free replacement for Doom's; none of it is id Software's.
 - **Regenerate or add sprites:**
   `python3 tools/wad.py freedoom2.wad --export assets/freedoom/sprites.json TROOA1 TROOB1 ...`
+  (it rewrites the file, so list every sprite to keep)
   (`--list PREFIX` shows what's in the WAD, `--png DIR NAME...` dumps previews).
 - **Regenerate or add textures:**
   `python3 tools/wad.py freedoom2.wad --export-textures assets/freedoom/textures.json STARTAN3 ...`

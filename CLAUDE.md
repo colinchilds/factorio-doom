@@ -124,6 +124,15 @@ Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► sp
      H side ¾ as bright). Per (side, type, texel value) a decider gated the same way outputs that
      color: one bus per texel value. Times the brightness `17*FOG / (D + FOG)` (≤ 17, so ≤ 255 per
      channel): `C_t`, one product per texel value, fixed above its palette column.
+   - **Color grade (user request, 2026-11-02):** in game the screen looked dark and washed out
+     (lamps draw a dark frame around each lit square). Every palette (walls, flats, things) goes
+     through `sprite.grade` before the 4-bit store: a gamma lift on the brightest channel,
+     scaling all three so hue holds and nothing clips (a per-channel clamp flattened SP_HOT1 to
+     solid red), and a saturation boost. Fog (tiles to half brightness) went from 4 to 8. Mean
+     luma of sample frames 28 → 61. Constants only: no combinators, no latency.
+   - **Build parameters (user request):** `raycast.Shading`, flags `--gamma` (default 0.5),
+     `--saturation` (1.25) and `--fog` (8) on `raycast.py` and `game.py`. `--gamma 1
+     --saturation 1 --fog 4` gives the old colors.
 5. **Rows** (fixed, 27 combinators per row at tex 64, slots right to left from the screen,
    skipping the substation lattice's columns):
    - `V = D / c_y` with `c_y = round(H * 2^14 / ((2y + 1 - H) * tex))`: 4 × (texel row − tex/2).
@@ -155,7 +164,36 @@ Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► sp
      `check_row_reach`). The strip block below alternates sides so each side's networks stay
      contiguous (with 82 slot columns it is only about 50 deep).
 
-Still to come (M4+): sprites and the rest below.
+7. **Things (M4 sprites, `demos/things.py`, 2026-11-01):** monsters and items at map positions
+   (`THINGS`, up to 8), Freedoom frames on the walls' texel grid (STEX = 64 per tile) in a box of
+   32 rows from eye level to the floor, so only the lower half of the screen has thing rows. The
+   module docstring has the formulas.
+   - **Per thing (scalars):** depth `alpha = rx DX + ry DY` and lateral `L = ry DX - rx DY` (DX,
+     DY, -DY lookups on green, shared by every thing's products; on one wire with rx the compiler
+     copied the table per thing). Per column `U = camx * (alpha / 1551) - L + C` is the box column
+     times 2^12.
+   - **Nearest per column:** two min trees over the things (absent lanes lose: `(red < green AND
+     red != 0) OR green = 0`). `Zt = (alpha >> 10) << KB + U` gives the box column ordered by
+     depth; `Dt = alpha * 64 + frame` gives the precise depth and the frame. They can disagree
+     only when two things are within 1/256 tile of each other. One thing per column: a farther
+     thing is hidden by the nearer one's box columns, even where it is transparent.
+   - **Lookups per (frame, u):** a mask word (bit 31 − t: row t opaque) and 4 texel words, keyed
+     by `SK = Zt AND (2^KB - 1)` (ranges) and `FR = Dt AND 63`. They sit in the strip block after
+     the wall strips.
+   - **Kill, no extra latency:** per thing row, `Q = Dt / 4cs_y`, `P = 2 ^ Q` (constant-first
+     Each power: 0 once Q ≥ 32, `arith_const_each` case), `OM = mask * P`, then `OM < 0` and
+     `D - Dt/512 > 0` → 2^29 onto the wall's V network. The wall's mux ranges and the bounded bg
+     (|V| < 2^28) miss it, so the wall and floor output nothing there. It has to arrive with V, so
+     the thing path is timed back from V: trees out 4 ticks before it, which fits 8 things.
+   - **Texel path:** `Vs = Dt / cs_y`, mux per word, shift, and 15 palette deciders copying
+     `color * brightness` gated by the thing being in front (one bus per color, like the walls).
+   - **Layout:** the kill path (`sq sp som kill`) sits before `v` in the interleave. The thing
+     palettes and texel nodes are woven between the wall palettes (`palette_run`), so rows
+     without things still chain their palettes within reach.
+   - **Cost at 160×100:** about 1,900 combinators (8 things, 6 frames; 14,912 in all), and no
+     latency.
+
+Still to come (M4): enemies, shooting, HUD, doors; see "Next steps".
 
 Earlier notes that still hold:
 
@@ -321,7 +359,9 @@ The game is the referee, and fsim is the fast development loop:
      `x_right`;
    - wires each network as a minimum spanning tree (Kruskal over grid neighbors for big nets),
      bridging long edges with medium poles: greedy toward the target, A* around obstacles when
-     that gets stuck;
+     that gets stuck. A long edge whose end is boxed in (no free tile within reach, e.g. deep in
+     the packed thing rows) can't take a pole, so such edges are avoided and the tree is rebuilt
+     (`_mst(fps, boxed)`); the 320×200 thing kill column needed it;
    - evaluates the graph without timing (`Graph.evaluate`), using the same specs it emits. That
      evaluation is the reference: the simulated blueprint must match it frame for frame. It
      shares input sums between nodes reading the same sources and indexes key lookups, so a
@@ -428,7 +468,13 @@ Decided with the user:
 The raycaster driven by the pad: walk, turn, slide along walls. Screen, then the pad on its
 right, then the player logic below the pad.
 - **State:** one register REG (`Each + 0`, green self-loop) holds X, Y (displacement from
-  SPAWN) and R (unbounded turn; the view angle is (R + A0) & 255).
+  SPAWN) and R (unbounded turn, in quarter view angles: the view angle is ((R >> 2) + A0) & 255).
+  - **Finer turning (user request, 2026-11-01):** 2 view angles per tick (a turn in 2.1 s,
+    about 40° per tap) felt stiff. R counts 1,024 per revolution (`ANGLE_SUB`) and turns
+    `--turn` (default 3) per tick: 3/8 of the old rate, a turn in 5.7 s. The lookups key on
+    `R & 1023` with the `>> 2` folded into the tables (camera `angle_sub`), so no extra tick;
+    `lookup_scalar` merges runs of consecutive keys into ranges, so the 4× keys cost few
+    extra conditions.
 - **Player logic:** a netlist graph with **ext inputs**: `Graph.ext(entity, pos, ...)` is an
   entity placed by the caller, feeding the graph at time 0. Here that's REG and the pad's HELD
   network.
@@ -455,11 +501,12 @@ right, then the player logic below the pad.
 - **Checks (with M3 textures):**
   - `--verify`: REG matches the reference on every tick, the player box never touches a wall,
     and sampled frames match the raycaster evaluation, at 64×40, 160×100 and 320×200.
-  - The 64×40 build (normal substations) matches the game on 4,263,031 checks with flats
-    (`harness/run.py --warmup 60`, scripted inserts, 400 ticks; about 3 minutes and a 1 GB dump).
-    Without flats it matched on 3,367,999, and M2 on 1,209,416.
-  - 160×100 and 320×200 import in Space Age, fully powered, at 0.78 and 1.40 ms per tick (without
-    flats 0.59 and 1.16; M2: 0.40 and 0.88). Blueprint strings 0.9 and 2.4 MB.
+  - The 64×40 build (normal substations) matches the game on 4,706,537 checks with things
+    (`harness/run.py --warmup 60`, scripted inserts, 400 ticks; about 4 minutes and a 1 GB dump).
+    With flats only it matched on 4,263,031, without flats on 3,367,999, and M2 on 1,209,416.
+  - 160×100 imports in Space Age, fully powered, at 0.87 ms per tick with things (0.78 without;
+    without flats 0.59; M2 0.40). 320×200: 1.75 ms with things (1.40 without, 1.16 without
+    flats, M2 0.88). Blueprint strings 1.0 and 2.6 MB.
 - **Input-to-screen latency:** about 22 ticks (0.37 s) for both turning and walking: pad 3,
   gate or turn decider into REG 2, raycaster 17 with the lamps.
   - **History:** about 56 ticks at first (the user felt "almost a full second"), then 27 for
@@ -491,8 +538,8 @@ right, then the player logic below the pad.
 
 Done:
 - The design above, and checks of the 2.1 features it depends on.
-- fsim, the harness, the conformance suite (16 cases, including chests, range lookups and
-  which lanes an Each decider visits) and the gradient demo.
+- fsim, the harness, the conformance suite (17 cases, including chests, range lookups,
+  which lanes an Each decider visits and constant-first powers) and the gradient demo.
   All match the real game exactly.
 - The input pad (above): decided with the user, matches the game.
 - M2 movement (above): matches the game.
@@ -503,13 +550,20 @@ Done:
   at three sizes and in the game.
 - The netlist compiler and the raycaster (above): M1 flat walls, then M3 Freedoom textures (walls, floors, ceilings),
   driven by the pad in the game build.
+- M4 step 1, things (architecture item 7): static Freedoom monsters and items on the map,
+  occluded by walls, in the raycaster and the game at no extra latency.
 
 Commit only when the user asks.
 
 ## Next steps (in order)
 
-1. **M4:** sprites, enemies, shooting, HUD, doors. Sprites need a per-column depth buffer: D
-   is on `[MV, MH]` already. M5 (stretch): angled walls, varying heights.
+1. **M4, the rest:** things are drawn (item 7); next are enemies (positions and frames from a
+   state register instead of constants: `column_stage` takes scalars, and the box per sprite type
+   already fits every frame), shooting (hitscan on the center column: the nearest thing there is
+   on `Zt`/`Dt`), HUD, doors. M5 (stretch): angled walls, varying heights.
+   - Thing follow-ups: more than 8 things (a fourth tree level costs a tick, or sort by depth on
+     scalars); a second nearest layer so overlapping things don't cut each other; things taller
+     than eye level (they'd need upper-half rows).
 2. **Possible M3 follow-ups:** fix the mirrored faces; fewer strip deciders (4,096 of the
    ~13,000 combinators at 160×100); different flats per room (needs the map cell per pixel, which
    the wrapping product throws away); a lower-cost flat path (the 32 word deciders per row are

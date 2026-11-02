@@ -73,6 +73,19 @@ def arith_scalar(b):
 
 
 @case(ticks=6)
+def arith_const_each(b):
+    """constant op Each (constant first operand): powers with big and negative exponents (2^n wraps
+    to 0 from n = 32), shifts and divisions with the lane value as the second operand."""
+    vals = [1, 5, 30, 31, 32, 33, 63, 64, 100, 640, 1000, 65536, -1, -32, INT_MIN, INT_MAX]
+    r = b.constant(0, 0, [(sig(LETTERS[i]), v) for i, v in enumerate(vals)])
+    g = b.constant(1, 0, [(sig(LETTERS[0]), 4)])
+    combs = [b.arithmetic(i, 2, c, op, EACH, EACH, None, RED)
+             for i, (c, op) in enumerate([(2, "^"), (3, "^"), (-2, "^"), (100, "-"), (1, "<<"), (-7, "/"), (7, "%")])]
+    combs.append(b.arithmetic(len(combs), 2, 2, "^", EACH, EACH))   # both wires (A: 1 + 4)
+    wire_inputs(b, combs, r, g)
+
+
+@case(ticks=6)
 def decider_each(b):
     """Per-lane conditions, per-lane else-outputs, named outputs under Each conditions."""
     r, g = pair_inputs(b)

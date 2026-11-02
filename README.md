@@ -24,7 +24,8 @@ The tools so far:
   (`compiler/`), which balances latency, places and wires the circuit, and evaluates it as the
   reference.
 - **The game** (`demos/game.py`): the raycaster driven by a chest input pad (god mode, drop
-  items with Z): walk, turn, slide along walls.
+  items with Z): walk, turn, slide along walls. Freedoom monsters and items stand on the map
+  (`demos/things.py`), hidden behind nearer walls.
 - **Demos** (`demos/`): `gradient.py` builds a 16×16 lamp screen laid out like the planned
   renderer's row stage. fsim and the game agree on it lamp for lamp.
 
@@ -58,6 +59,8 @@ python3 harness/run.py --bench 300 bench/gen/*_160x100.json -o bench/m0_160x100.
 python3 demos/raycast.py --size 160x100 --verify   # -> demos/gen/raycast_160x100.{json,txt}
 python3 demos/raycast.py --size 64x40 --tex 32 --verify --every 1   # smaller textures, every frame
 python3 demos/raycast.py --size 160x100 --flat 0   # untextured floor/ceiling (cheaper); --flat 8/16/32
+python3 demos/game.py --size 320x200 --gamma 0.4 --fog 12   # brighter screen (--gamma 1 --saturation 1 --fog 4: Freedoom's colors)
+python3 demos/raycast.py --size 160x100 --no-things   # without the monsters and items (also game.py)
 python3 harness/run.py --warmup 60 out/dir -o dump.json   # deep pipelines: settle before t0
 # Substations default to legendary (28x28 supply, fewer dead pixels). Game checks without the
 # DLC need normal ones; with the DLC: harness/run.py --dlc --bench 30 demos/gen/raycast_160x100.json

@@ -1,4 +1,4 @@
-"""M3 raycaster: Freedoom-textured walls, floors and ceilings, a scripted camera, at any --size.
+"""M4 raycaster: Freedoom-textured walls, floors and ceilings, monsters and items, a scripted camera, at any --size.
 
 Everything runs as vectors whose lanes are screen columns (no per-column units):
 
@@ -14,7 +14,7 @@ Everything runs as vectors whose lanes are screen columns (no per-column units):
   split     the last min level splits by side: MV = D where vertical lines are nearer, MH the rest
   texture   per side, TK = type and texture column from the key; strip lookups gated by the side
             being nearer give tex/8 words of packed texels per column (8 x 4 bits), palettes the
-            same way (one bus per texel value), times a brightness BRIGHT / (D + FOG)
+            same way (one bus per texel value), times a brightness bright / (D + fog)
   rows      per screen row y: V = D / c_y = 4 (v - tex/2) (texel row v), a mux picks word v >> 3,
             a shift by 4 (v & 7) puts the texel in the top nibble, and one decider per texel value
             copies its color bus. Out-of-wall rows (|V| >= 2 tex) get a word of all 1s, the
@@ -25,6 +25,9 @@ Everything runs as vectors whose lanes are screen columns (no per-column units):
             texels, a shift picks the texel, and one decider per flat color, where the wall's texel
             is 15, outputs that color at the row's brightness (constant: the distance is H / |r|).
             Runs beside the march, so it adds no latency.
+  things    monsters and items (demos/things.py): per column the nearest thing's box column and
+            depth, per lower row its texel; an opaque one in front of the wall kills the wall's
+            pixel through V and paints its own color. Timed back from V: no latency.
 
 Lanes vanish when a value is 0, which would silently drop columns. Every vector that might hit 0
 is combined lane-wise with one that is nonzero on every lane, or read by a decider that also
@@ -51,7 +54,8 @@ sys.path.insert(0, str(HERE))
 from bp import DEFAULT_SUBSTATION_QUALITY, Blueprint, encode, quality_arg  # noqa: E402
 from compiler import semantics as sem  # noqa: E402
 from compiler.netlist import EACH, GREEN, LANE_SIGNALS, RED, Collect, Graph, Scalar  # noqa: E402
-from sprite import nearest, quantize  # noqa: E402
+from sprite import DEFAULT_GAMMA, DEFAULT_SATURATION, c4 as to_c4, nearest, quantize  # noqa: E402
+import things as th  # noqa: E402
 
 MAP = """
 #######BB#######
@@ -80,8 +84,7 @@ RADIUS = int(1.25 * FP)
 PLANE = 676                  # tan(fov/2) * 1024: about 66 degrees
 HIT = -(1 << 30)
 DS = 1 << 15                 # distance D: 2^15 per tile
-FOG = 4 * DS                 # D at about half brightness
-BRIGHT = 17 * FOG            # brightness = BRIGHT / (D + FOG) <= 17; texture channels <= 15
+DEFAULT_FOG = 8.0            # tiles to half brightness (4 looked murky on lamps)
 NEG = 4 * len(MAP)           # line base of map keys for rays going - (keys grow with distance)
 COLORS = 14                  # texels 1..14 per texture; 15 marks floor / ceiling
 DEFAULT_TEX = 64             # texture resolution (texels per tile, both ways)
@@ -176,11 +179,38 @@ def key_ranges(keys, shift, base=0):
     return conds
 
 
+class Shading:
+    """Screen colors (build parameters; constants in the blueprint, so no combinators or ticks):
+    the palette grade (sprite.grade: gamma on the brightest channel, saturation) and the distance
+    to half brightness. Brightness is bright / (D + fog) <= 17, with palette channels <= 15."""
+
+    def __init__(self, gamma=DEFAULT_GAMMA, saturation=DEFAULT_SATURATION, fog=DEFAULT_FOG):
+        if not (gamma > 0 and saturation >= 0 and 0 < fog <= 1000):
+            raise SystemExit(f"shading: need gamma > 0, saturation >= 0, 0 < fog <= 1000 (got {gamma}, {saturation}, {fog})")
+        self.gamma, self.saturation = gamma, saturation
+        self.fog = max(1, round(fog * DS))   # in D units
+        self.bright = 17 * self.fog
+
+    def c4(self, rgb):
+        return to_c4(rgb, self.gamma, self.saturation)
+
+    @classmethod
+    def from_args(cls, a):
+        return cls(a.gamma, a.saturation, a.fog)
+
+
+def shading_args(ap):
+    ap.add_argument("--gamma", type=float, default=DEFAULT_GAMMA,
+                    help="palette gamma on the brightest channel (1 = Freedoom's colors, lower = brighter)")
+    ap.add_argument("--saturation", type=float, default=DEFAULT_SATURATION, help="palette saturation (1 = unchanged)")
+    ap.add_argument("--fog", type=float, default=DEFAULT_FOG, help="distance in tiles at which walls are half as bright")
+
+
 # ---------------------------------------------------------------------------------------------
 # Textures: Freedoom wall textures, one tile = 128 x 128 texture units, box-filtered to tex x tex
 # and quantized to COLORS colors each, stored at 4 bits per channel (times a brightness <= 17).
 
-def load_textures(tex):
+def load_textures(tex, shade):
     if 128 % tex or tex % 16:
         raise SystemExit(f"texture resolution {tex}: must divide 128 and be a multiple of 16")
     data = json.loads(TEXTURES.read_text())
@@ -205,7 +235,7 @@ def load_textures(tex):
             px.append(line)
         centers = quantize([c for r in px for c in r], COLORS)
         texels = [[1 + nearest(centers, c) for c in r] for r in px]
-        c4 = [tuple(min(15, round(x / 17)) for x in c) for c in centers]
+        c4 = [shade.c4(c) for c in centers]
         out.append({"char": ch, "name": TEXTURE_OF[ch], "texels": texels, "c4": c4})
     return out
 
@@ -245,7 +275,7 @@ def nibble_range(t, wire=RED, first=None):
 # to FLAT_COLORS colors. A floor pixel's world position is P + (H / |r|) * ray (r = 2y + 1 - H),
 # kept as its position within the tile times 2^32 (int32 products wrap, which drops the tile).
 
-def load_flats(f):
+def load_flats(f, shade):
     if f not in (8, 16, 32):
         raise SystemExit(f"flat resolution {f}: must be 8, 16 or 32 (or 0 for untextured)")
     data = json.loads(TEXTURES.read_text())
@@ -257,7 +287,7 @@ def load_flats(f):
                           / (s * s)) for c in range(3)) for v in range(f) for u in range(f)]
         centers = quantize(px, FLAT_COLORS)
         texels = [[nearest(centers, px[v * f + u]) for u in range(f)] for v in range(f)]
-        c4 = [tuple(min(15, round(x / 17)) for x in c) for c in centers]
+        c4 = [shade.c4(c) for c in centers]
         out[part] = {"name": name, "texels": texels, "c4": c4}
     return out
 
@@ -267,11 +297,11 @@ def flat_word(texels, v, j):
     return sem.i32(sum(texels[v][8 * j + n] << (28 - 4 * n) for n in range(8)))
 
 
-def row_scale(y, h):
+def row_scale(y, h, shade):
     """Flat sampling for screen row y: K with ray * K = the floor offset in 2^-32 tiles (RAW has
     the ray at 2^20), and the brightness at that distance (h / |r| tiles)."""
     r = abs(2 * y + 1 - h)
-    return round(h * (1 << 12) / r), BRIGHT // (h * DS // r + FOG)
+    return round(h * (1 << 12) / r), shade.bright // (h * DS // r + shade.fog)
 
 
 def flat_color(c4, br):
@@ -286,9 +316,10 @@ def scripted_camera(g):
     cos_t, sin_t = trig(math.cos), trig(math.sin)
     OX = g.ss(g.lookup_scalar(B, cos_t, 12, "cosB"), "-", 1024)
     OY = g.ss(g.lookup_scalar(B, sin_t, 12, "sinB"), "-", 1024)
-    PX = g.ss(g.ss(g.ss(g.ss(OX, "*", RADIUS), ">>", 10), "+", int(CENTER[0])), "OR", 1, "px")
-    PY = g.ss(g.ss(g.ss(g.ss(OY, "*", RADIUS), ">>", 10), "+", int(CENTER[1])), "OR", 1, "py")
-    return A, PX, PY, {"T": T}
+    X0 = g.ss(g.ss(g.ss(OX, "*", RADIUS), ">>", 10), "+", int(CENTER[0]), "x0")
+    Y0 = g.ss(g.ss(g.ss(OY, "*", RADIUS), ">>", 10), "+", int(CENTER[1]), "y0")
+    PX, PY = g.ss(X0, "OR", 1, "px"), g.ss(Y0, "OR", 1, "py")
+    return A, PX, PY, {"T": T, "pos0": (X0, Y0, (0, 0))}
 
 
 def slot_columns(n, hole, x_right=-2):
@@ -305,36 +336,48 @@ def slot_columns(n, hole, x_right=-2):
     return xs
 
 
-def row_slots(nw, words, flats):
+def row_slots(nw, words, flats, tcolors=0):
     """Slot names of a row pipeline, left to right. Each row-local network (below) must have its
     members within wire reach of each other, so the wall chain is interleaved into the end of
-    the flat word deciders."""
+    the flat word deciders. tcolors: thing colors (0 = no things); things add a kill path before
+    V and a texel path between the palettes and the screen."""
     mux = [f"mux{j}" for j in range(nw)]
     pals = [f"pal{c}" for c in range(1, COLORS + 1)]
+    kill = th.slots_kill() if tcolors else []
+    if tcolors:
+        pals = th.palette_run(pals, tcolors)
     if not flats:
-        return ["v", "bg"] + mux + ["S", "shift", "pal15"] + pals
-    pre, a = ["v", "bg"] + mux[:-1], words[:-1]
+        return kill + ["v", "bg"] + mux + ["S", "shift", "pal15"] + pals
+    pre, a = kill + ["v", "bg"] + mux[:-1], words[:-1]
     k = min(len(pre), len(a))
     mid = a[:len(a) - k] + pre[:len(pre) - k] + [x for pair in zip(a[len(a) - k:], pre[len(pre) - k:]) for x in pair]
     return (["px", "py", "fx", "fy"] + mid + [words[-1], "sf1", "wd", mux[-1], "sf", "S", "tf", "shift"]
             + [f"fpal{c}" for c in range(FLAT_COLORS)] + pals)
 
 
-def row_nets(nw, words, flats):
+def row_nets(nw, words, flats, tcolors=0):
     """Networks within one row (lists of slot names) for the reach check."""
     mux = [f"mux{j}" for j in range(nw)]
     pals = [f"pal{c}" for c in range(1, COLORS + 1)] + (["pal15"] if not flats else [])
     fpals = [f"fpal{c}" for c in range(FLAT_COLORS)] if flats else []
-    nets = [["v", "bg"] + mux + ["S"], mux + ["bg", "shift"], ["S", "shift"], ["shift"] + fpals + pals, fpals + pals]
+    tpals = [f"spal{c}" for c in range(1, tcolors + 1)]
+    nets = [["v", "bg"] + mux + ["S"], mux + ["bg", "shift"], ["S", "shift"], ["shift"] + fpals + pals,
+            fpals + pals + tpals]
     if flats:
         nets += [["px", "fx"], ["py", "fy"], ["fx", "sf1"] + words, ["fy"] + words, words + ["wd"], ["sf1", "sf"],
                  ["wd", "tf"], ["sf", "tf"], ["tf"] + fpals]
+    if tcolors:
+        nets += th.nets(tcolors)
     return nets
 
 
-def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX, flat=DEFAULT_FLAT):
+def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX, flat=DEFAULT_FLAT, things=None,
+                shade=None):
     """camera(g) -> (A, PX, PY, extra scalars): view angle 0..255 and an odd position (1/FP
-    tiles) as scalars of g. extra may hold "angle_offset", added to A by the tables.
+    tiles) as scalars of g. extra may hold "angle_offset", added to A by the tables, and
+    "angle_sub": A counts 2^sub steps per view angle (0..(256 << sub) - 1). It must hold
+    "pos0" = (X0, Y0, (ox, oy)) for things: the position as early as possible, PX ~ X0 + ox.
+    things: [(x, y, frame)] (demos/things.py), or None. shade: Shading (colors, fog).
 
     The row stage and the texture lookup block are fixed nodes left of (and below) the screen,
     avoiding the substation lattice hole(x, y); the rest is placed by the compiler left of them
@@ -346,9 +389,12 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
     ones = lambda: vec([1] * w, "ones")  # noqa: E731
     camx = [(2 * c + 1 - w) * 1024 // w for c in range(w)]
     assert all(camx)
-    textures = load_textures(tex)
+    shade = shade or Shading()
+    textures = load_textures(tex, shade)
     NT, nw = len(textures), tex // 8
-    flats = load_flats(flat) if flat else None
+    flats = load_flats(flat, shade) if flat else None
+    sprites = th.load(sorted({n for _, _, n in things}), shade) if things else None
+    tcolors = len(sprites["colors"]) if things else 0
 
     # -- scalars: the camera vectors come straight out of signed lookups keyed by the view angle.
     A, PX, PY, extra = camera(g)
@@ -358,7 +404,10 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
     if lag > 0:
         A = Scalar(g.delay(A.node, lag), A.signal)
     tabs = camera_tables(extra.pop("angle_offset", 0))
-    look = lambda name, table: g.lookup_scalar(A, table, 32, name)  # noqa: E731
+    pos0 = extra.pop("pos0", None)
+    # A may count in 2^sub steps per view angle (finer turning); the tables key on A directly.
+    sub = extra.pop("angle_sub", 0)
+    look = lambda name, table: g.lookup_scalar(A, {k: table[k >> sub] for k in range(256 << sub)}, 32, name)  # noqa: E731
     PLX = look("PLX", {a: tabs[a]["PLX"] for a in range(256)})
     PLY = look("PLY", {a: tabs[a]["PLY"] for a in range(256)})
     DX10 = look("DX10", ray_base(tabs, camx, "DX", "PLX"))
@@ -453,6 +502,12 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
                    red=M0, green=M1, label="nearest V")
     MH = g.decider(cmp(">="), [sem.out(EACH, networks=GREEN), sem.out(EACH, constant=1 << 30)],
                    red=M0, green=M1, label="nearest H")
+    t_v = MV.time + 1   # the rows' V
+    if things:
+        col = th.column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_v, shade)
+        DD = th.visible(g, MV, MH, col)
+        SC = th.colors_bus(g, DD, col, sprites, t_v)
+        wbus = [g.delay(n, t_v - n.time) for n in col["wsum"]]
 
     # -- texture key per side: TK = (type + 1) << 12 | u << (12 - log2 tex), u the texture column
     # (from the key's low bits), type from range tests on the key (HIT + key).
@@ -485,7 +540,7 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
                 if c <= len(t["c4"]):
                     pal[c].append(g.decider(rng, [sem.out(EACH, constant=side_color(t["c4"][c - 1], side))],
                                             red=TK, green=MS, label=f"pal{side}.{t['name']}.{c}"))
-    BR = g.vv(vec([BRIGHT] * w, "bright"), "/", [MV, MH, vec([FOG] * w, "fog")], "brightness")
+    BR = g.vv(vec([shade.bright] * w, "bright"), "/", [MV, MH, vec([shade.fog] * w, "fog")], "brightness")
     CT = {c: g.vv(pal[c], "*", BR, f"color{c}") for c in pal}
 
     # -- rows. Texel row v = tex/2 + r * tex * D / (H * 2^16) for r = 2y + 1 - H, kept as
@@ -497,7 +552,7 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
     # the texel. Floor pixels are where the wall's texel is 15; one decider per flat color there.
     fb = flat.bit_length() - 1 if flat else 0
     words_of = [f"w{v}.{j}" for v in range(flat) for j in range(flat // 8)] if flat else []
-    names = row_slots(nw, words_of, flat)
+    names = row_slots(nw, words_of, flat, tcolors)
     xs = slot_columns(len(names), hole)
     X = dict(zip(reversed(names), xs))
     if flat:
@@ -509,14 +564,24 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
         r = 2 * y + 1 - h
         cy = round(h * (1 << 14) / (r * tex))
         V = g.vc([MV, MH], "/", cy, f"v{y}")
+        node = {"v": V}
+        tpals = []
+        if things and y >= th.first_row(h):
+            # A thing's opaque texel in front of the wall adds 2^29 to V: no wall mux or bg fires.
+            node.update(th.row_kill(g, y, h, col, DD))
+            V = [V, node["kill"]]
+            tnode, tpals = th.row_texels(g, y, h, col, SC, wbus)
+            node.update(tnode)
         mux = [g.decider([sem.cond(EACH, "!=", 0, GREEN), sem.cond(EACH, ">=", 4 * (8 * j - tex // 2), RED, "and"),
                           sem.cond(EACH, "<", 4 * (8 * j + 8 - tex // 2), RED, "and")],
                          [sem.out(EACH, networks=GREEN)], red=V, green=words[j], label=f"mux{y}.{j}") for j in range(nw)]
-        bg = g.decider([sem.cond(EACH, "<", -2 * tex, RED), sem.cond(EACH, ">=", 2 * tex, RED, "or")],
+        lim = th.KILL >> 1   # V outside +-lim is a killed pixel
+        bg = g.decider([sem.cond(EACH, "<", -2 * tex, RED), sem.cond(EACH, ">=", -lim, RED, "and"),
+                        sem.cond(EACH, ">=", 2 * tex, RED, "or"), sem.cond(EACH, "<", lim, RED, "and")],
                        [sem.out(EACH, constant=-1)], red=V, label=f"bg{y}")
         S = g.vc(V, "AND", 28, f"nibble{y}")
         T = g.vv(mux + [bg], "<<", S, f"texel{y}")
-        node = {"v": V, "bg": bg, "S": S, "shift": T, **{f"mux{j}": m for j, m in enumerate(mux)}}
+        node.update({"bg": bg, "S": S, "shift": T, **{f"mux{j}": m for j, m in enumerate(mux)}})
         pals = [g.decider(nibble_range(c), [sem.out(EACH, networks=GREEN)], red=T, green=CT[c], label=f"pal{y}.{c}")
                 for c in pal]
         node.update({f"pal{c}": n for c, n in zip(pal, pals)})
@@ -526,7 +591,7 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
             pals = [fl] + pals
         else:
             part = flats["floor" if r > 0 else "ceiling"]
-            ky, br = row_scale(y, h)
+            ky, br = row_scale(y, h, shade)
             # The raw rays, delayed so the flat texel lands with the wall's.
             at = T.time - 5
             if sums[0].time > at:
@@ -557,30 +622,42 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
                 node[f"fpal{c}"] = n
                 fpals.append(n)
             pals = fpals + pals
+        pals = pals + tpals
         for name, n in node.items():
             n.fixed, n.pos = True, (X[name], y)
         rows.append(Collect(pals))
         palettes.append(pals)
-        check_row_reach(X, node, nw, words_of, flat)
+        check_row_reach(X, node, nw, words_of, flat, tcolors)
     # Color buses: the product and its alignment delay above their palette column.
     for c, n in CT.items():
         n.fixed, n.pos = True, (X[f"pal{c}"], -2)
         d = g.delay(n, 1)
         d.fixed, d.pos = True, (X[f"pal{c}"], -1)
-    # The strip block: below the rows, filled column by column (word by word).
-    block = [n for ws in words for n in ws]
+    if things:
+        # Thing color products and word sums, with their delays, in the empty thing slots above
+        # the first thing row.
+        y0 = th.first_row(h)
+        for c, n in SC.items():
+            n.fixed, n.pos = True, (X[f"spal{c}"], y0 - 2)
+            d = g.delay(n, 1)
+            d.fixed, d.pos = True, (X[f"spal{c}"], y0 - 1)
+        for j, (n, d) in enumerate(zip(col["wsum"], wbus)):
+            n.fixed, n.pos = True, (X[f"smux{j}"], y0 - 2)
+            d.fixed, d.pos = True, (X[f"smux{j}"], y0 - 1)
+    # The strip block: below the rows, filled column by column (word by word); thing lookups after.
+    block = [n for ws in words for n in ws] + (col["lookups"] if things else [])
     block_cols = sorted(xs)
     per_col = -(-len(block) // len(block_cols))
     for i, n in enumerate(block):
         n.fixed, n.pos = True, (block_cols[i // per_col], h + 2 + i % per_col)
     layout = {"x_right": min(xs) - 4, "palettes": palettes, "textures": textures, "tex": tex, "flats": flats,
-              "flat": flat}
-    return g, cols, rows, {**extra, "A": A, "PX": PX, "PY": PY, "tables": tabs}, layout
+              "flat": flat, "things": things, "sprites": sprites, "shade": shade}
+    return g, cols, rows, {**extra, "A": A, "PX": PX, "PY": PY, "tables": tabs, "angle_sub": sub}, layout
 
 
-def check_row_reach(X, node, nw, words, flats):
+def check_row_reach(X, node, nw, words, flats, tcolors=0):
     """Every row-local network's members, in x order, within wire reach (combinators are 2 wide)."""
-    for net in row_nets(nw, words, flats):
+    for net in row_nets(nw, words, flats, tcolors):
         xs = sorted(X[n] for n in net if n in node)
         for a, b in zip(xs, xs[1:]):
             if b - a - 2 > 9:
@@ -599,12 +676,13 @@ def wire_screen(b, ent, cols, layout, w, h):
         b.chain(lamps, 1)
 
 
-def build(w, h, substation_quality=DEFAULT_SUBSTATION_QUALITY, tex=DEFAULT_TEX, flat=DEFAULT_FLAT):
+def build(w, h, substation_quality=DEFAULT_SUBSTATION_QUALITY, tex=DEFAULT_TEX, flat=DEFAULT_FLAT, things=th.THINGS,
+          shade=None):
     if w > len(LANE_SIGNALS):
         raise SystemExit(f"width {w} needs {w} lane signals, only {len(LANE_SIGNALS)}")
-    b = Blueprint(f"Raycaster M3 {w}x{h}", substation_quality)
+    b = Blueprint(f"Raycaster M4 {w}x{h}", substation_quality)
     lattice = b.grid.hole
-    g, cols, rows, scal, layout = build_graph(w, h, hole=lattice, tex=tex, flat=flat)
+    g, cols, rows, scal, layout = build_graph(w, h, hole=lattice, tex=tex, flat=flat, things=things, shade=shade)
     ent = g.compile(b, blocked=lattice, region=lambda x, y: x <= -2, x_right=layout["x_right"])
     wire_screen(b, ent, cols, layout, w, h)
     _substations(b)
@@ -642,10 +720,11 @@ def ideal(g, scal, layout, w, h, T):
     """Float raycaster from the same camera scalars, textured and shaded the same way: a sanity
     check for the fixed-point math (not expected to match every pixel)."""
     vals = {k: g.evaluate(T, [scal[k].node])[0].get(sem.key(scal[k].signal), 0) for k in ("A", "PX", "PY")}
-    vals.update(scal["tables"][vals["A"]])
+    vals.update(scal["tables"][vals["A"] >> scal["angle_sub"]])
     tex, textures, types, flats, f = layout["tex"], layout["textures"], wall_types(), layout["flats"], layout["flat"]
     px, py = vals["PX"] / FP, vals["PY"] / FP
     img = [[pack(background(y, h))] * w for y in range(h)]
+    wall_d = []
     for c in range(w):
         camx = ((2 * c + 1 - w) * 1024 // w) / 1024
         rdx = (vals["DX"] + vals["PLX"] * camx) / 1024
@@ -657,7 +736,7 @@ def ideal(g, scal, layout, w, h, T):
                 fx, fy = px + d * rdx, py + d * rdy
                 u, v = int((fx - math.floor(fx)) * f), int((fy - math.floor(fy)) * f)
                 part = flats["floor" if r > 0 else "ceiling"]
-                img[y][c] = flat_color(part["c4"][part["texels"][v][u]], row_scale(y, h)[1])
+                img[y][c] = flat_color(part["c4"][part["texels"][v][u]], row_scale(y, h, layout["shade"])[1])
         mx, my = int(px), int(py)
         ddx = abs(1 / rdx) if rdx else 1e30
         ddy = abs(1 / rdy) if rdy else 1e30
@@ -671,15 +750,18 @@ def ideal(g, scal, layout, w, h, T):
                 d, side, ty, my = ty, 1, ty + ddy, my + sy
             if is_wall(MAP[my][mx]):
                 break
+        wall_d.append(d)
         across = (py + d * rdy) if side == 0 else (px + d * rdx)
         u = int((across - math.floor(across)) * tex)
         t = textures[types.index(MAP[my][mx])]
         ds = d * DS
-        br = int(BRIGHT / (ds + FOG))
+        br = int(layout["shade"].bright / (ds + layout["shade"].fog))
         for y in range(h):
             v = tex / 2 + (2 * y + 1 - h) * tex * ds / (h * (1 << 16))
             if 0 <= v < tex:
                 img[y][c] = br * side_color(t["c4"][t["texels"][int(v)][u] - 1], side)
+    if layout["things"]:
+        th.ideal(img, vals, layout["things"], layout["sprites"], wall_d, w, h, layout["shade"])
     return img
 
 
@@ -738,10 +820,13 @@ def main():
     ap.add_argument("--tex", type=int, default=DEFAULT_TEX, help="texture resolution (texels per tile)")
     ap.add_argument("--flat", type=int, default=DEFAULT_FLAT,
                     help="floor/ceiling texture resolution (texels per tile: 8, 16, 32; 0 = untextured)")
+    ap.add_argument("--no-things", action="store_true", help="leave out the monsters and items")
     quality_arg(ap)
+    shading_args(ap)
     a = ap.parse_args()
     w, h = map(int, a.size.lower().split("x"))
-    g, b, cols, rows, scal, layout = build(w, h, a.substation_quality, a.tex, a.flat)
+    g, b, cols, rows, scal, layout = build(w, h, a.substation_quality, a.tex, a.flat, None if a.no_things else th.THINGS,
+                                               Shading.from_args(a))
     data = b.to_json()
     data["fsim"] = {"ticks": a.ticks, "doc": f"raycaster M3 {w}x{h}"}
     gen = HERE / "gen"

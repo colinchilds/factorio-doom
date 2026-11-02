@@ -173,7 +173,20 @@ class Graph:
                 groups.setdefault(keys, []).append(b)
         nodes = []
         for keys, bs in groups.items():
-            conds = [sem.cond(a.signal, "=", k, RED, "or" if i else None) for i, k in enumerate(keys)]
+            # Runs of 3+ consecutive keys become one range (two conditions).
+            runs = []
+            for k in keys:
+                if runs and runs[-1][1] == k - 1:
+                    runs[-1][1] = k
+                else:
+                    runs.append([k, k])
+            conds = []
+            for lo, hi in runs:
+                if hi - lo >= 2:
+                    conds += [sem.cond(a.signal, ">=", lo, RED, "or" if conds else None),
+                              sem.cond(a.signal, "<=", hi, RED, "and")]
+                else:
+                    conds += [sem.cond(a.signal, "=", k, RED, "or" if conds else None) for k in range(lo, hi + 1)]
             spec = sem.decider_spec(conds, [sem.out(out, constant=sem.i32(sum(1 << b for b in bs)))])
             nodes.append(self.op("decider", spec, [a.node], [], f"{label} bit{bs[0]}"))
         return Scalar(Collect(nodes), out)
@@ -537,20 +550,25 @@ def _relay_search(a_fp, a_pole, c_fp, c_pole, usable, taken, reaches):
     raise ValueError(f"can't route a wire from {a_fp} to {c_fp}")
 
 
-def _mst(fps):
+def _mst(fps, boxed=()):
     """Minimum spanning tree over footprint gaps: [(gap, i, j)], each edge joining node i to the
     tree through j. Prim's for small nets; for big ones Kruskal over the pairs in neighboring grid
-    cells, with coarser cells until everything is joined."""
+    cells, with coarser cells until everything is joined. Edges longer than REACH touching a boxed
+    member (no room for a relay pole next to it) cost extra, so they're used only as a last resort."""
     n = len(fps)
+
+    def cost(i, j):
+        d = gap(fps[i], fps[j])
+        return d + 1e6 if d > REACH and (i in boxed or j in boxed) else d
     if n <= 120:
         edges = []
-        best = {i: (gap(fps[0], fps[i]), 0) for i in range(1, n)}
+        best = {i: (cost(0, i), 0) for i in range(1, n)}
         while best:
             i = min(best, key=lambda i: best[i][0])
-            dist, j = best.pop(i)
-            edges.append((dist, j, i))
+            _, j = best.pop(i)
+            edges.append((gap(fps[j], fps[i]), j, i))
             for k in best:
-                d2 = gap(fps[i], fps[k])
+                d2 = cost(i, k)
                 if d2 < best[k][0]:
                     best[k] = (d2, i)
         return edges
@@ -577,13 +595,15 @@ def _mst(fps):
                         ri = find(i)
                         for j in other:
                             if i < j and find(j) != ri:
-                                cand.append((gap(fps[i], fps[j]), i, j))
+                                cand.append((cost(i, j), i, j))
+        if size < 10 ** 6:   # boxed long edges only once nothing else is left
+            cand = [c for c in cand if c[0] < 1e6]
         cand.sort()
         for d, i, j in cand:
             ri, rj = find(i), find(j)
             if ri != rj:
                 parent[ri] = rj
-                edges.append((d, i, j))
+                edges.append((gap(fps[i], fps[j]), i, j))
                 comps -= 1
         if comps == 1:
             break
@@ -606,7 +626,22 @@ def _wire(g, nets, b, ent, usable):
         for d in net["dst"]:
             members.append((d, RED_IN if color == "red" else GREEN_IN))
         fps = [footprint(n) for n, _ in members]
-        for dist, j, i in _mst(fps):
+        edges = _mst(fps)
+        # A long edge needs a relay pole within reach of each end. Members boxed in (inside a
+        # packed block) can't take one: if the tree uses such an edge, rebuild it with those
+        # members joined only within reach, so the net enters the block where there is room.
+        if any(d > REACH for d, _, _ in edges):
+            free = lambda fp: any((x, y) not in taken and usable(x, y) and gap(fp, (x, y, x + 1, y + 1)) <= REACH  # noqa: E731
+                                  for x in range(fp[0] - 10, fp[2] + 10) for y in range(fp[1] - 10, fp[3] + 10))
+            boxed, cache = set(), {}
+            while True:
+                new = {k for d, j, i in edges if d > REACH for k in (j, i)
+                       if k not in boxed and not cache.setdefault(k, free(fps[k]))}
+                if not new:
+                    break
+                boxed |= new
+                edges = _mst(fps, boxed)
+        for dist, j, i in edges:
             (a, ca), (c, cc) = members[j], members[i]
             a_end = (ent[a.id][1 if ca in (RED_OUT, GREEN_OUT) else 0], ca)
             c_end = (ent[c.id][1 if cc in (RED_OUT, GREEN_OUT) else 0], cc)
