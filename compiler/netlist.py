@@ -186,8 +186,19 @@ class Graph:
     def evaluate(self, T, want, inputs=None):
         """Outputs of the nodes in `want` for clock value T and ext values inputs ({node: signal
         dict}), ignoring timing."""
-        cache = {}
+        cache, sums, scratch = {}, {}, {}
         inputs = {k.id: v for k, v in (inputs or {}).items()}
+
+        def total(srcs):
+            """The sum of several outputs, shared by every node reading the same set (and never
+            mutated, so semantics can cache by id)."""
+            k = tuple(sorted(m.id for m in srcs))
+            if k not in sums:
+                acc = {}
+                for m in srcs:
+                    sem.add_into(acc, val(m))
+                sums[k] = acc
+            return sums[k]
 
         def val(n):
             if isinstance(n, Collect):
@@ -204,12 +215,7 @@ class Graph:
             elif n.kind == "ext":
                 r = dict(inputs.get(n.id, {}))
             else:
-                red, green = {}, {}
-                for m in n.red:
-                    sem.add_into(red, val(m))
-                for m in n.green:
-                    sem.add_into(green, val(m))
-                r = sem.evaluate(n.kind, n.spec, red, green)
+                r = sem.evaluate(n.kind, n.spec, total(_flat(n.red)), total(_flat(n.green)), scratch)
             cache[n.id] = r
             return r
 
@@ -314,6 +320,10 @@ class Collect:
         self.time = ts.pop()
         self.kind = "collect"
         self.label = nodes[0].label
+
+
+def _flat(lst):
+    return [m for x in lst for m in (x.nodes if isinstance(x, Collect) else [x])]
 
 
 def _l(x):
@@ -452,14 +462,14 @@ def _center_dist(a, b):
 def _relay(b, a_fp, a_end, c_fp, c_end, conn, usable, taken, a_pole=False, c_pole=False):
     """Wire a to c, adding medium poles when they're out of reach. Pole to entity is measured
     footprint to footprint, pole to pole center to center (both reach 9). a_pole / c_pole: the
-    ends are poles themselves."""
-    prev_fp, prev_end, prev_pole = a_fp, a_end, a_pole
-
+    ends are poles themselves. Greedy (each pole as close to c as it can get) when that works,
+    else an A* search around whatever is in the way."""
     def reaches(fp1, pole1, fp2, pole2):
         return (_center_dist(fp1, fp2) if pole1 and pole2 else gap(fp1, fp2)) <= REACH
 
+    tx, ty = (c_fp[0] + c_fp[2]) / 2, (c_fp[1] + c_fp[3]) / 2
+    path, prev_fp, prev_pole = [], a_fp, a_pole
     while not reaches(prev_fp, prev_pole, c_fp, c_pole):
-        tx, ty = (c_fp[0] + c_fp[2]) / 2, (c_fp[1] + c_fp[3]) / 2
         here = ((prev_fp[0] + prev_fp[2]) / 2 - tx) ** 2 + ((prev_fp[1] + prev_fp[3]) / 2 - ty) ** 2
         best = None
         x0, y0 = int(prev_fp[0]), int(prev_fp[1])
@@ -474,13 +484,110 @@ def _relay(b, a_fp, a_end, c_fp, c_end, conn, usable, taken, a_pole=False, c_pol
                 if best is None or d < best[0]:
                     best = (d, x, y)
         if best is None or best[0] >= here:
-            raise ValueError(f"can't route a wire from {a_fp} to {c_fp}")
+            path = _relay_search(a_fp, a_pole, c_fp, c_pole, usable, taken, reaches)
+            break
         _, x, y = best
+        path.append((x, y))
+        prev_fp, prev_pole = (x, y, x + 1, y + 1), True
+    prev_end = a_end
+    for x, y in path:
         pole = b.pole(x, y)
         taken.add((x, y))
         b.wire(prev_end[0], prev_end[1], pole, conn)
-        prev_fp, prev_end, prev_pole = (x, y, x + 1, y + 1), (pole, conn), True
+        prev_end = (pole, conn)
     b.wire(prev_end[0], prev_end[1], c_end[0], c_end[1])
+
+
+def _relay_search(a_fp, a_pole, c_fp, c_pole, usable, taken, reaches):
+    """A* over pole positions (hops on a 3-tile lattice plus free tiles next to the ends)."""
+    import heapq
+    tx, ty = (c_fp[0] + c_fp[2]) / 2, (c_fp[1] + c_fp[3]) / 2
+    free = lambda x, y: (x, y) not in taken and usable(x, y)  # noqa: E731
+    hops = [(dx, dy) for dx in range(-9, 10) for dy in range(-9, 10) if dx * dx + dy * dy <= 81 and (dx or dy)]
+    h = lambda x, y: ((x + 0.5 - tx) ** 2 + (y + 0.5 - ty) ** 2) ** 0.5 / 9  # noqa: E731
+    start = []
+    x0, y0 = int(a_fp[0]), int(a_fp[1])
+    for x in range(x0 - 10, x0 + 12):
+        for y in range(y0 - 10, y0 + 12):
+            if free(x, y) and reaches(a_fp, a_pole, (x, y, x + 1, y + 1), True):
+                start.append((x, y))
+    prev = {p: None for p in start}
+    cost = {p: 1 for p in start}
+    heap = [(1 + h(*p), p) for p in start]
+    heapq.heapify(heap)
+    seen = 0
+    while heap:
+        _, p = heapq.heappop(heap)
+        seen += 1
+        if seen > 200000:
+            break
+        if reaches((p[0], p[1], p[0] + 1, p[1] + 1), True, c_fp, c_pole):
+            path = []
+            while p:
+                path.append(p)
+                p = prev[p]
+            return path[::-1]
+        for dx, dy in hops:
+            q = (p[0] + dx, p[1] + dy)
+            if q in cost or not free(*q):
+                continue
+            cost[q] = cost[p] + 1
+            prev[q] = p
+            heapq.heappush(heap, (cost[q] + h(*q), q))
+    raise ValueError(f"can't route a wire from {a_fp} to {c_fp}")
+
+
+def _mst(fps):
+    """Minimum spanning tree over footprint gaps: [(gap, i, j)], each edge joining node i to the
+    tree through j. Prim's for small nets; for big ones Kruskal over the pairs in neighboring grid
+    cells, with coarser cells until everything is joined."""
+    n = len(fps)
+    if n <= 120:
+        edges = []
+        best = {i: (gap(fps[0], fps[i]), 0) for i in range(1, n)}
+        while best:
+            i = min(best, key=lambda i: best[i][0])
+            dist, j = best.pop(i)
+            edges.append((dist, j, i))
+            for k in best:
+                d2 = gap(fps[i], fps[k])
+                if d2 < best[k][0]:
+                    best[k] = (d2, i)
+        return edges
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    edges, comps = [], n
+    for size in (3, 10, 30, 100, 300, 1000, 10 ** 6):
+        cells = {}
+        for i, f in enumerate(fps):
+            cells.setdefault((int(f[0] // size), int(f[1] // size)), []).append(i)
+        cand = []
+        for (cx, cy), idx in cells.items():
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    other = cells.get((cx + dx, cy + dy))
+                    if not other:
+                        continue
+                    for i in idx:
+                        ri = find(i)
+                        for j in other:
+                            if i < j and find(j) != ri:
+                                cand.append((gap(fps[i], fps[j]), i, j))
+        cand.sort()
+        for d, i, j in cand:
+            ri, rj = find(i), find(j)
+            if ri != rj:
+                parent[ri] = rj
+                edges.append((d, i, j))
+                comps -= 1
+        if comps == 1:
+            break
+    return edges
 
 
 def _wire(g, nets, b, ent, usable):
@@ -498,13 +605,8 @@ def _wire(g, nets, b, ent, usable):
                 members.append((s, RED_OUT if color == "red" else GREEN_OUT))
         for d in net["dst"]:
             members.append((d, RED_IN if color == "red" else GREEN_IN))
-        # Prim's MST over footprint gaps.
         fps = [footprint(n) for n, _ in members]
-        inside = {0}
-        best = {i: (gap(fps[0], fps[i]), 0) for i in range(1, len(members))}
-        while best:
-            i = min(best, key=lambda i: best[i][0])
-            dist, j = best.pop(i)
+        for dist, j, i in _mst(fps):
             (a, ca), (c, cc) = members[j], members[i]
             a_end = (ent[a.id][1 if ca in (RED_OUT, GREEN_OUT) else 0], ca)
             c_end = (ent[c.id][1 if cc in (RED_OUT, GREEN_OUT) else 0], cc)
@@ -516,9 +618,4 @@ def _wire(g, nets, b, ent, usable):
                 relays += len(b.entities) - n0
             else:
                 b.wire(*a_end, *c_end)
-            inside.add(i)
-            for k in best:
-                d2 = gap(fps[i], fps[k])
-                if d2 < best[k][0]:
-                    best[k] = (d2, i)
     g.relays = relays

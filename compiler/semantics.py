@@ -115,8 +115,10 @@ CMP = {"<": lambda a, b: a < b, ">": lambda a, b: a > b, "=": lambda a, b: a == 
        "≤": lambda a, b: a <= b, ">=": lambda a, b: a >= b, "≥": lambda a, b: a >= b}
 
 
-def evaluate(kind, spec, red, green):
-    return _arith(spec, red, green) if kind == "arith" else _decider(spec, red, green)
+def evaluate(kind, spec, red, green, cache=None):
+    """cache: a dict shared by one evaluation pass in which input dicts are never mutated (keyed
+    by their ids), so merged networks and value indexes are computed once."""
+    return _arith(spec, red, green) if kind == "arith" else _decider(spec, red, green, cache)
 
 
 def _operand(spec, side, red, green):
@@ -170,46 +172,86 @@ def _groups(conds):
     return groups
 
 
-def _cond_value(c, side, red, green, lane):
-    s = c.get(f"{side}_signal")
-    if s is None:
-        return c.get("constant", 0)
-    net = _net(red, green, c.get(f"{side}_signal_networks"))
-    if s["name"] == EACH:
-        return net.get(lane, 0)
-    if s["name"] in (EVERYTHING, ANYTHING):
-        raise NotImplementedError(s["name"])
-    return net.get(key(s), 0)
+def _net_cached(red, green, nets, cache):
+    if cache is None:
+        return _net(red, green, nets)
+    nets = nets or {"red": True, "green": True}
+    k = ("net", id(red), id(green), nets.get("red", True), nets.get("green", True))
+    if k not in cache:
+        cache[k] = (_net(red, green, nets), red, green)   # keep the inputs alive: ids stay unique
+    return cache[k][0]
 
 
-def _decider(spec, red, green):
+def _index(d, cache):
+    """{value: [lanes]} for a lane dict."""
+    k = ("idx", id(d))
+    if k not in cache:
+        idx = {}
+        for lane, v in d.items():
+            idx.setdefault(v, []).append(lane)
+        cache[k] = (idx, d)
+    return cache[k][0]
+
+
+def _decider(spec, red, green, cache=None):
     conds = spec["conditions"]
-    groups = _groups(conds)
+
+    def operand(c, side):
+        s = c.get(f"{side}_signal")
+        if s is None:
+            return False, c.get("constant", 0)
+        net = _net_cached(red, green, c.get(f"{side}_signal_networks"), cache)
+        if s["name"] == EACH:
+            return True, net
+        if s["name"] in (EVERYTHING, ANYTHING):
+            raise NotImplementedError(s["name"])
+        return False, net.get(key(s), 0)
+
+    groups = [[(CMP[c["comparator"]], operand(c, "first"), operand(c, "second")) for c in g] for g in _groups(conds)]
 
     def holds(lane):
-        return any(all(CMP[c["comparator"]](_cond_value(c, "first", red, green, lane),
-                                            _cond_value(c, "second", red, green, lane)) for c in g) for g in groups)
+        for g in groups:
+            for cmp, (ea, a), (eb, b) in g:
+                va = a.get(lane, 0) if ea else a
+                vb = b.get(lane, 0) if eb else b
+                if not cmp(va, vb):
+                    break
+            else:
+                return True
+        return False
 
-    uses_each = any((c.get(f"{s}_signal") or {}).get("name") == EACH for c in conds for s in ("first", "second"))
+    each_nets = [x for g in groups for _, a, b in g for e, x in (a, b) if e]
     res = {}
-    if uses_each:
-        lanes = set()
-        for c in conds:
-            for side in ("first", "second"):
-                s = c.get(f"{side}_signal")
-                if s and s["name"] == EACH:
-                    lanes |= set(_net(red, green, c.get(f"{side}_signal_networks")))
-        for lane in lanes:
-            outs = spec["outputs"] if holds(lane) else spec.get("else_outputs", [])
-            for o in outs:
-                if o["signal"]["name"] != EACH:
-                    raise NotImplementedError("named output under Each conditions")
+    if each_nets:
+        outs, else_outs = spec["outputs"], spec.get("else_outputs", [])
+        for o in outs + else_outs:
+            if o["signal"]["name"] != EACH:
+                raise NotImplementedError("named output under Each conditions")
+        first = groups[0][0]
+        if (cache is not None and len(groups) == 1 and not else_outs and first[0] is CMP["="]
+                and first[1][0] and not first[2][0] and first[2][1] != 0):
+            # A key lookup: only lanes whose value equals the key can pass.
+            cand = _index(first[1][1], cache).get(first[2][1], [])
+            passing, failing = [l for l in cand if holds(l)], []
+        else:
+            lanes = set()
+            for x in each_nets:
+                lanes |= x.keys()
+            passing, failing = [], []
+            for lane in lanes:
+                (passing if holds(lane) else failing).append(lane)
+        for lst, os_ in ((passing, outs), (failing, else_outs)):
+            for o in os_:
                 if o.get("copy_count_from_input", True):
-                    v = _net(red, green, o.get("networks")).get(lane, 0)
+                    src = _net_cached(red, green, o.get("networks"), cache)
+                    for lane in lst:
+                        add_into(res, {lane: src.get(lane, 0)})
                 else:
                     v = o.get("constant", 1)
-                add_into(res, {lane: v})
+                    for lane in lst:
+                        add_into(res, {lane: v})
         return res
+
     outs = spec["outputs"] if holds(None) else spec.get("else_outputs", [])
     for o in outs:
         name = o["signal"]["name"]

@@ -135,6 +135,37 @@ def decider_ranges(b):
 
 
 @case(ticks=6)
+def decider_lanes(b):
+    """Which lanes an Each decider visits: the union over every Each operand of every condition,
+    so a condition on green brings in lanes that are absent (0) on red. Also: a per-lane key
+    match gated by the other wire, range tests on large signed values, division by a negative
+    constant."""
+    extra = [(3 << 28, 4), (-(1 << 28), 6), (1 << 28, 9), (-(5 << 28), 1), (0, -2), (-4, 0),
+             (0x70000000, 5), (-(1 << 28) - 1, 2), (7, 0), (0, 8)]
+    r, g = pair_inputs(b, PAIRS + extra)
+    combs = [
+        # Texture mux: red in [-5, 6) on lanes present on green; red-absent lanes count as 0.
+        b.decider(0, 2, [cond(EACH, "!=", 0, GREEN), cond(EACH, ">=", -5, RED, compare_type="and"),
+                         cond(EACH, "<", 6, RED, compare_type="and")], [out(EACH, networks=GREEN)]),
+        # The same without the green condition: only red's lanes are visited.
+        b.decider(1, 2, [cond(EACH, ">=", -5, RED), cond(EACH, "<", 6, RED, compare_type="and")],
+                  [out(EACH, networks=GREEN)]),
+        # Masked lookup: red = key and green > 0.
+        b.decider(2, 2, [cond(EACH, "=", 7, RED), cond(EACH, ">", 0, GREEN, compare_type="and")],
+                  [out(EACH, copy=False, constant=99)]),
+        # Top-nibble range tests on large signed values.
+        b.decider(3, 2, [cond(EACH, ">=", -(1 << 28), RED), cond(EACH, "<", 0, RED, compare_type="and")],
+                  [out(EACH, copy=False, constant=15)], [out(EACH, copy=False, constant=1)]),
+        b.decider(4, 2, [cond(EACH, ">=", 1 << 28, RED), cond(EACH, "<", 2 << 28, RED, compare_type="and"),
+                         cond(EACH, "<", -(1 << 30), RED, compare_type="or")],
+                  [out(EACH, networks=GREEN)]),
+        b.arithmetic(5, 2, EACH, "/", -3, EACH, RED),
+        b.arithmetic(6, 2, EACH, "<<", EACH, EACH, GREEN, RED),
+    ]
+    wire_inputs(b, combs, r, g)
+
+
+@case(ticks=6)
 def decider_logic(b):
     """AND/OR precedence, everything/anything, outputs of everything, empty inputs."""
     inp = b.constant(0, 0, {"signal-A": 5, "signal-D": -4, "signal-E": 9})

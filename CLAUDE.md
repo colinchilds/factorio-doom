@@ -56,15 +56,17 @@ is what makes this look feasible now.
 
 ## Renderer architecture
 
-M1 (flat-shaded walls) is built and verified; see "Raycaster M1" below. The original plan had
-one column unit (~20 combinators) per screen column. The built design is far smaller: **the
-whole ray march is vector ops with lanes = screen columns**, about 640 combinators at any width.
+M3 (Freedoom-textured walls) is built and verified; see "Raycaster" below. The original plan
+had one column unit (~20 combinators) per screen column. The built design is far smaller: **the
+whole ray march is vector ops with lanes = screen columns** (about 700 combinators at any
+width), plus a fixed texture lookup block (2 × types × tex × tex/8 deciders, 4,096 for 4
+textures at 64) and 27 combinators per screen row.
 
 ```
-Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► shade ─► one decider per row ─► lamps
- x, y, angle, sin/cos    RDX, RDY        each step one W-lane        wall height,
- (bit-sliced lookups)    per column      network; running per-lane   brightness, color
-                                         min keeps the nearest hit
+Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► split ─► texture ─► row pipelines ─► lamps
+ x, y, angle, sin/cos    RDX, RDY        each step one W-lane      by side   strip words,  v, mux, shift,
+ (bit-sliced lookups)    per column      network; min trees keep             palettes ×    palette
+                                         the nearest hit                     brightness
 ```
 
 1. **Game state:** position in 1/256 tiles, angle 0–255.
@@ -84,32 +86,55 @@ Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► sh
      once from k. Crossing k is at signed distance `along_k = sel(256(k+1), -256k) - FR` along
      the axis (sel per lane by the ray's sign, FR the position within the tile). Then each is one
      division:
-     - distance `D_k = along_k * 8192 / RD` (2^11 per tile of ray length);
-     - map key `Q_k = along_k * 16 * RO / RD + 16 PO + (P >> 8 << 18) + line_k`: the key of the
-       cell entered, << 12. Vertical lines use `64*(x+1) + y`; horizontal lines use
-       `64*y + x + 1`, with their own wall table.
-   - A lookup decider per step tests key *ranges* (`lo <= Each < hi`, consecutive wall keys
-     merged), so there's no `>> 12`. It outputs `-2^30` on wall lanes; added to `D_k` on the
-     same wire, that makes hits negative.
+     - distance `D_k = along_k * 2^17 / RD` (DS = 2^15 per tile of ray length; the numerator
+       stays under 2^30);
+     - map key `key_k = along_k * 16 * RO / RD + 16 PO + line_k`: the key of the cell entered,
+       << 12, with the position across the line (the texture column) in the low 12 bits.
+       Vertical lines use `64*a + y`, horizontal lines `64*a + x + 1`, where the line index a is
+       `x + 1` (or `y`) for rays going + and `NEG - x` (`NEG - y`, NEG = 64) for rays going −.
+       So **keys grow with distance either way** (`cell_keys`), and line_k is `(C + k + 2) << 18`
+       or `(NEG + k + 1 - C) << 18` from the cell C: one decider per sign, each adding its
+       broadcast (16 PO ± C << 18) from green.
+   - A lookup decider per step tests key *ranges* (`lo <= Each < hi`, consecutive wall keys of
+     both formats merged), so there's no `>> 12`. It outputs `HIT = -2^30` on wall lanes.
    - Vectors shared by all steps (FR terms, the broadcast position) ride on the per-step sign
      selectors: a decider outputs `Each = constant` plus `Each` copied from a shared green wire.
      That avoids a copy of the shared vector per step.
-   - A min tree per side over its K leaves (`Each(red) < Each(green)` → copy red, else copy
-     green, depth 4) keeps the nearest hit. The last level is split: MV keeps the lanes where
-     the vertical side is nearer, MH the rest (ties).
+   - Two min trees per side (`Each(red) < Each(green)` → copy red, else copy green, depth 4):
+     over `HIT + D_k` (the distance) and over `HIT + key_k` (the same nearest hit, since keys grow
+     with distance: its wall type and texture column). The key tree pairs its leaves the other
+     way round, so each hit decider feeds one red and one green network (no duplicate). The
+     key leaf's `key_k` is delayed one tick (`Each + 0`) to meet the hit decider's output.
    - Before 2026-11-01 the steps were recurrences with a running-min chain (18 more ticks), and
      then a sign/abs/divide/multiply/add/shift chain (6 more ticks than now).
    - Out-of-map keys can alias real wall keys, but only for crossings beyond the boundary wall,
      which is always nearer. So the map must be closed.
-4. **Shade:** DS = M + 2^30 is never formed (the constant rides on each consumer's wire).
-   `LH + 1 = (H*2048 + DS) / DS`. Brightness per side is `16*8192 / (DS + 8192)`, which is 0
-   on the other side's lanes (where DS is just 2^30) and ≥ 1 within the march. Times the side's
-   base color (channels ≤ 15, so no carry between channels), the two sides just add up.
-5. **Rows:** one decider per screen row: `LH > |2y+1-H|` → copy the color vector, else the
-   row's floor/ceiling color (a decider else-output).
+4. **Split and texture** (`build_graph`):
+   - The last D level splits by side: MV = `Each(red) < Each(green)` → copy red plus a constant
+     2^30, which turns `HIT + D` into D (MH: `>=`, copy green, the ties). The two never share a
+     lane, so `[MV, MH]` on one wire is D.
+   - Per side, the texture key `TK = (type + 1) << 12 | u`: u from `key AND (4096 - 4096/tex)`,
+     the type from range deciders on `HIT + key` (one per wall type).
+   - **Strip lookups:** one decider per (side, type, texture column, word): `Each(red TK) = key
+     AND Each(green MV) > 0` → `Each = word`. Gating by the side being nearer gets the words out
+     one tick after the split (masking TK first would cost a tick). Each word holds 8 texels,
+     texel n at bits 28 − 4n. Fixed block below the row stage, filled column by column.
+   - **Palettes:** textures are quantized to 14 colors each, stored at 4 bits per channel (the
+     H side ¾ as bright). Per (side, type, texel value) a decider gated the same way outputs that
+     color: one bus per texel value. Times the brightness `17*FOG / (D + FOG)` (≤ 17, so ≤ 255 per
+     channel): `C_t`, one product per texel value, fixed above its palette column.
+5. **Rows** (fixed, 27 combinators per row at tex 64, slots right to left from the screen,
+   skipping the substation lattice's columns):
+   - `V = D / c_y` with `c_y = round(H * 2^14 / ((2y + 1 - H) * tex))`: 4 × (texel row − tex/2).
+     The wall covers `|V| < 2 tex`, so there's no wall-height vector.
+   - Mux: per word j, `Each(green) != 0 AND lo_j <= Each(red V) < hi_j` → copy the word bus. The
+     green condition makes the decider visit lanes where V is 0 (absent). Plus `bg`: V out of the
+     wall → `Each = -1`.
+   - `T = word << (V AND 28)`: the texel is in the top nibble (all 1s = floor/ceiling).
+   - Palette: one decider per texel value, a range test on the top nibble (signed) → copy `C_t`;
+     nibble 15 → the row's floor/ceiling color.
 
-Still to come (M3+): textures via the packed-strip path the sprite demo proved, sprites and
-the rest below.
+Still to come (M4+): sprites and the rest below.
 
 Earlier notes that still hold:
 
@@ -121,7 +146,8 @@ Earlier notes that still hold:
    At 160×100 and above, use per-row networks. The whole-frame vector only fits up to 2,878
    pixels.
 
-   Texturing, about 10 lane-ops per pixel and no per-pixel lookup tables:
+   Texturing, about 10 lane-ops per pixel and no per-pixel lookup tables (built in M3 as
+   above, with a mux per row instead of one shift, and palette deciders instead of a multiply):
    - The column stage fetches its wall's texture column as a packed strip (e.g. 4-bit texels,
      8 per int).
    - Each pixel computes texel `v` from a precomputed `1/h`, then `(strip >> 4v) & 15` with
@@ -268,10 +294,17 @@ The game is the referee, and fsim is the fast development loop:
    - gives each consumer its own constant combinator, and duplicates a node whose output must
      join two different networks of one color;
    - places one tile column per time step (right to left from the sinks), each node at the mean
-     row of its consumers, leaving the column between steps for constants and relay poles;
-   - wires each network as a minimum spanning tree, bridging long edges with medium poles;
+     row of its consumers, leaving the column between steps for constants and relay poles.
+     Regular blocks (the raycaster's row pipelines, its strip lookups) are **fixed nodes** the
+     caller positions (`n.fixed, n.pos`); the placer only fills in the rest, left of
+     `x_right`;
+   - wires each network as a minimum spanning tree (Kruskal over grid neighbors for big nets),
+     bridging long edges with medium poles: greedy toward the target, A* around obstacles when
+     that gets stuck;
    - evaluates the graph without timing (`Graph.evaluate`), using the same specs it emits. That
-     evaluation is the reference: the simulated blueprint must match it frame for frame.
+     evaluation is the reference: the simulated blueprint must match it frame for frame. It
+     shares input sums between nodes reading the same sources and indexes key lookups, so a
+     160×100 textured frame takes about 0.4 s.
 6. **Benchmarks** (`bench/m0.py`): synthetic row-stage blueprints at any W×H, written to
    `bench/gen/` (gitignored, up to 13 MB each).
 
@@ -303,18 +336,29 @@ any `--size`. It proves the texture path planned above:
   - Generated files go to `demos/gen/` (gitignored). The `.txt` file is the blueprint string to
     paste.
 
-### Raycaster M1 (`demos/raycast.py`, 2026-11-01)
+### Raycaster (`demos/raycast.py`): M1 2026-11-01, M3 textures 2026-11-01
 
-Flat-shaded walls, floor and ceiling, 16×16 original map, the camera circling and turning on
-a script. Built with the netlist compiler at any `--size`.
-- **Size:** 464 / 530 / 632 combinators at 64×40 / 160×100 / 320×200, plus lamps. A new frame
-  every tick. Latency 16 ticks from the camera port with the game's camera (23 before the
-  setup rework, 42 before the parallel march); M1's scripted camera adds its own path.
+Freedoom-textured walls (M1: flat-shaded), a floor/ceiling gradient, 16×16 original map, the
+camera circling and turning on a script. Built with the netlist compiler at any `--size`.
+- **Map and textures:** wall characters pick textures (`TEXTURE_OF`): `#` STARTAN3, `B` BRICK7,
+  `M` MARBLE1, `R` SP_HOT1, from `assets/freedoom/textures.json` (`tools/wad.py
+  --export-textures`; it also has STONE2 and WOOD1). A tile is 128×128 texture units,
+  box-filtered to `--tex` (default 64) texels each way.
+- **Size:** 5,847 / 7,473 / 10,175 combinators at 64×40 / 160×100 / 320×200 (M1: 464 / 530 /
+  632), plus lamps and about 600–750 relay poles. Of those, 4,096 are strip lookups (4 textures
+  at tex 64) and 27 per row. A new frame every tick.
+- **Latency:** 17 ticks from the camera port with the game's camera (M1 16; 23 before the setup
+  rework, 42 before the parallel march); the scripted camera adds its own path.
 - **Checks:**
-  - `--verify` compares every fsim frame with the netlist evaluation (exact), and samples the
-    float raycaster (`ideal()`, within about 2% of pixels: rounding at wall edges).
-  - The 64×40 version matches the game on 451,792 checks. Deep pipelines need the harness
-    run with `--warmup 60`, so the warm-up state settles before t0 in both the game and fsim.
+  - `--verify` compares sampled fsim frames (`--every`) with the netlist evaluation (exact; 0
+    differ at 64×40 and 160×100), and samples the float raycaster (`ideal()`, textured: about
+    7–8% of pixels differ, from texel and brightness rounding at boundaries).
+  - The M1 64×40 version matched the game on 451,792 checks; M3 is checked through the game
+    build (below). Deep pipelines need the harness run with `--warmup 60`, so the warm-up state
+    settles before t0 in both the game and fsim.
+- **Known limitation:** u is the position along the wall's axis, so textures are mirrored on
+  faces seen from the other side (side 0 rays going −, side 1 rays going +). Fixing it costs a
+  tick or doubles the strip block; text-free textures hide it.
 
 ### Input pad (`demos/input_pad.py`, 2026-11-01)
 
@@ -384,19 +428,21 @@ right, then the player logic below the pad.
   raycaster graph's ext input) over a big-pole line above the screen.
   `raycast.build_graph(w, h, camera)` takes the camera from the caller; M1's script is
   `scripted_camera`.
-- **Checks:**
+- **Checks (with M3 textures):**
   - `--verify`: REG matches the reference on every tick, the player box never touches a wall,
     and sampled frames match the raycaster evaluation, at 64×40, 160×100 and 320×200.
-  - The 64×40 build matches the game on 1,209,416 checks (`harness/run.py --warmup 60`,
-    scripted inserts, 400 ticks).
-  - 160×100 and 320×200 import in Space Age, fully powered, at 0.40 and 0.88 ms per tick.
-- **Input-to-screen latency:** about 21 ticks (0.35 s) for both turning and walking: pad 3,
-  gate or turn decider into REG 2, raycaster 16 with the lamps.
+  - The 64×40 build (normal substations) matches the game on 3,367,999 checks
+    (`harness/run.py --warmup 60`, scripted inserts, 400 ticks; about 2 minutes, a 750 MB dump).
+    M2 matched on 1,209,416.
+  - 160×100 and 320×200 import in Space Age, fully powered, at 0.59 and 1.16 ms per tick (M2:
+    0.40 and 0.88). Blueprint strings 0.6 and 1.9 MB.
+- **Input-to-screen latency:** about 22 ticks (0.37 s) for both turning and walking: pad 3,
+  gate or turn decider into REG 2, raycaster 17 with the lamps.
   - **History:** about 56 ticks at first (the user felt "almost a full second"), then 27 for
-    turning and 35 for walking, then this.
-  - **The raycaster's 16:** angle 1, camera lookups 1, ray products 1, ray shift / sign
-    selectors 1, key product 1, key division 1, hit lookup 1, min tree 5 (4 per side + the
-    split root), shading 2, rows 1, lamps 1.
+    turning and 35 for walking, then 21 (M2, flat walls), then this.
+  - **The raycaster's 17:** angle 1, camera lookups 1, ray products 1, ray shift / sign
+    selectors 1, key product 1, key division 1, hit lookup 1, min trees 4, side split 1, strip
+    lookups (and V) 1, mux 1, shift 1, palette 1, lamps 1.
 - **Further cuts if we want them (not done; option B, discussed 2026-11-01):**
   - **Angle ROM:** everything that depends only on view angle and column (ray components, the
     per-step slopes and distance steps, the sign selections) precomputed for all 256 angles in
@@ -411,8 +457,8 @@ right, then the player logic below the pad.
       8–10 MB, and the 3,000 or so selector deciders cost about 0.3 ms/tick.
     - Splitting the per-step terms by sign (`Each * (256 - FR)` on lanes going + and `Each *
       FR` on lanes going −) removes the sign-dependent constant vectors.
-    - Do it after M3: textures make the min tree carry more per column, which changes what the
-      march must produce.
+    - With M3 the march also feeds the key tree: its leaves (the per-step key) would come from
+      the ROM the same way.
   - **Bounded angle:** a wrap decider keeping R in about [-4, 259] (reading REG plus its own
     output, so it fires once) would let lookups key on R directly with the `& 255` folded into
     the tables: 1 tick off the raycaster and off the step lookups (box 78).
@@ -421,7 +467,8 @@ right, then the player logic below the pad.
 
 Done:
 - The design above, and checks of the 2.1 features it depends on.
-- fsim, the harness, the conformance suite (15 cases, including chests and range lookups) and the gradient demo.
+- fsim, the harness, the conformance suite (16 cases, including chests, range lookups and
+  which lanes an Each decider visits) and the gradient demo.
   All match the real game exactly.
 - The input pad (above): decided with the user, matches the game.
 - M2 movement (above): matches the game.
@@ -430,17 +477,20 @@ Done:
 - Screen size decided (160×100, aiming for 320×200), and M0 UPS measurements: 320×200 fits.
 - Freedoom sprite assets and the sprite demo (above): the texture path works end to end in fsim
   at three sizes and in the game.
-- The netlist compiler and the M1 raycaster (above).
+- The netlist compiler and the raycaster (above): M1 flat walls, then M3 Freedoom textures,
+  driven by the pad in the game build.
 
 Commit only when the user asks.
 
 ## Next steps (in order)
 
-1. **M3:** textures (the sprite demo's strip path, keyed by wall type and texture u from the
-   march) and distance shading per texture.
-2. **M4:** sprites, enemies, shooting, HUD, doors. M5 (stretch): angled walls, varying heights.
-3. **Tooling as needed:** fsim speed for 320×200 work (lookups are about 100× slower than the
-   game); the Python netlist evaluation takes about 3 s per frame at 320×200.
+1. **M4:** sprites, enemies, shooting, HUD, doors. Sprites need a per-column depth buffer: D
+   is on `[MV, MH]` already. M5 (stretch): angled walls, varying heights.
+2. **Possible M3 follow-ups:** fix the mirrored faces; textured floor/ceiling (needs per-pixel
+   world positions, far more expensive than walls); fewer strip deciders (they are 4,096 of the
+   ~7,500 combinators at 160×100).
+3. **Tooling as needed:** fsim speed for 320×200 work (about 70 ms per tick for the textured
+   game; lookups are about 100× slower than the game).
 
 ## Rules for working here
 

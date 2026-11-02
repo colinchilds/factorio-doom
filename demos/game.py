@@ -1,4 +1,5 @@
-"""M2: the raycaster driven by the input pad. Walk with the D-pad, turn, slide along walls.
+"""The game (M2 movement, M3 textured walls): the raycaster driven by the input pad. Walk with
+the D-pad, turn, slide along walls.
 
     screen (W x H lamps) | pad (demos/input_pad.py) | player logic below the pad
 
@@ -54,7 +55,7 @@ MARGIN = 48        # player box half-size (1/FP tiles), before the latency allow
 
 
 def walls():
-    return [(x, y) for y, row in enumerate(MAP) for x, c in enumerate(row) if c == "#"]
+    return [(x, y) for y, row in enumerate(MAP) for x, c in enumerate(row) if raycast.is_wall(c)]
 
 
 def velocity(a, fw=1):
@@ -158,9 +159,10 @@ def big_pole_line(b, points):
     return poles
 
 
-def build(w, h, n=None, hold=input_pad.DEFAULT_HOLD, substation_quality=DEFAULT_SUBSTATION_QUALITY):
+def build(w, h, n=None, hold=input_pad.DEFAULT_HOLD, substation_quality=DEFAULT_SUBSTATION_QUALITY,
+          tex=raycast.DEFAULT_TEX):
     n = n or input_pad.button_size(h)
-    b = Blueprint(f"Factorio Doom M2 {w}x{h}", substation_quality)
+    b = Blueprint(f"Factorio Doom M3 {w}x{h}", substation_quality)
     lattice = b.grid.hole
 
     # Pad right of the screen, player logic below it.
@@ -195,13 +197,10 @@ def build(w, h, n=None, hold=input_pad.DEFAULT_HOLD, substation_quality=DEFAULT_
     # Raycaster, camera from a pole left of the screen that the line from REG feeds.
     port_pos = (-4, -6)
     port = b.pole(*port_pos)
-    gr, cols, rows, scal = raycast.build_graph(w, h, camera_from(port, port_pos), Graph(reserved=[SX, SY, SR]))
-    ent_r = gr.compile(b, blocked=lattice, region=lambda x, y: x <= -3)
-    for y, node in enumerate(rows):
-        lamps = [b.lamp(x, y, {"use_colors": True, "color_mode": 2, "rgb_signal": cols[x]}, always_on=True)
-                 for x in range(w) if not lattice(x, y)]
-        b.wire(ent_r[node.id][1], RED_OUT, lamps[0], RED_IN)
-        b.chain(lamps, RED_IN)
+    gr, cols, rows, scal, layout = raycast.build_graph(w, h, camera_from(port, port_pos), Graph(reserved=[SX, SY, SR]),
+                                                       hole=lattice, tex=tex)
+    ent_r = gr.compile(b, blocked=lattice, region=lambda x, y: x <= -2, x_right=layout["x_right"])
+    raycast.wire_screen(b, ent_r, cols, layout, w, h)
 
     # REG -> up the gap right of the screen -> along the top -> the port.
     top = -10
@@ -294,7 +293,7 @@ def verify(path, b, pad, g, nodes, gr, cols, rows, w, h, inserts, ticks, hold, l
     # Collision: the player's box (half-size MARGIN around the position) never touches a wall.
     def touches(t):
         x, y = ref[t][sem.key(SX)] + SPAWN[0], ref[t][sem.key(SY)] + SPAWN[1]
-        return any(MAP[(y + dy) >> 8][(x + dx) >> 8] == "#" for dx in (-MARGIN, MARGIN) for dy in (-MARGIN, MARGIN))
+        return any(raycast.is_wall(MAP[(y + dy) >> 8][(x + dx) >> 8]) for dx in (-MARGIN, MARGIN) for dy in (-MARGIN, MARGIN))
     inside = [t for t in range(ticks) if touches(t)]
     print(f"player box ({MARGIN}/{FP} tile) touching a wall on {len(inside)} ticks")
     # Frames: rows evaluated from the reference state, at the raycaster's latency.
@@ -329,13 +328,14 @@ def main():
     ap.add_argument("--hold", type=int, default=input_pad.DEFAULT_HOLD)
     ap.add_argument("--ticks", type=int, default=700)
     ap.add_argument("--verify", action="store_true")
+    ap.add_argument("--tex", type=int, default=raycast.DEFAULT_TEX, help="texture resolution (texels per tile)")
     quality_arg(ap)
     a = ap.parse_args()
     w, h = map(int, a.size.lower().split("x"))
-    b, pad, g, nodes, gr, cols, rows, scal, lat, probe = build(w, h, a.button_size, a.hold, a.substation_quality)
+    b, pad, g, nodes, gr, cols, rows, scal, lat, probe = build(w, h, a.button_size, a.hold, a.substation_quality, a.tex)
     inserts = schedule(pad, a.ticks)
     data = b.to_json()
-    data["fsim"] = {"ticks": a.ticks, "doc": f"M2 {w}x{h}", "inserts": inserts}
+    data["fsim"] = {"ticks": a.ticks, "doc": f"M3 {w}x{h}", "inserts": inserts}
     gen = HERE / "gen"
     gen.mkdir(exist_ok=True)
     path = gen / f"game_{w}x{h}.json"

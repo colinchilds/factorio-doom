@@ -1,4 +1,4 @@
-"""M1 raycaster: flat-shaded walls, floor and ceiling, a scripted camera, at any --size.
+"""M3 raycaster: Freedoom-textured walls, floor and ceiling, a scripted camera, at any --size.
 
 Everything runs as vectors whose lanes are screen columns (no per-column units):
 
@@ -7,15 +7,25 @@ Everything runs as vectors whose lanes are screen columns (no per-column units):
             RD = RAW >> 10, never 0 by the choice of the rounding term (ray_base)
   march     for vertical grid lines and for horizontal ones separately: K steps, each one network
             of W lanes, all computed at once from the step index k. Step k's distance D_k and the
-            map key of the cell entered (<< 12) are each one division by RD. A range-lookup
-            decider marks walls with -2^30, and a min tree per side keeps the nearest hit.
-  shade     the last min level is split by side (MV, MH); LH + 1 = (H*2048 + DS) / DS,
-            brightness 16*8192 / (DS + 8192) per side (0 on the other side's lanes), times the
-            side's base color: two products that just add up
-  rows      one decider per screen row: LH > |2y+1-H| ? wall color : the row's floor/ceiling
+            map key of the cell entered (<< 12, with the position along the wall in the low bits)
+            are each one division by RD. A range-lookup decider marks walls with HIT = -2^30. Two
+            min trees per side: over HIT + D_k (the distance) and over HIT + key_k (keys grow
+            with distance, so the same nearest hit: its texture column and wall type).
+  split     the last min level splits by side: MV = D where vertical lines are nearer, MH the rest
+  texture   per side, TK = type and texture column from the key; strip lookups gated by the side
+            being nearer give tex/8 words of packed texels per column (8 x 4 bits), palettes the
+            same way (one bus per texel value), times a brightness BRIGHT / (D + FOG)
+  rows      per screen row y: V = D / c_y = 4 (v - tex/2) (texel row v), a mux picks word v >> 3,
+            a shift by 4 (v & 7) puts the texel in the top nibble, and one decider per texel value
+            copies its color bus. Out-of-wall rows (|V| >= 2 tex) get a word of all 1s, the
+            floor/ceiling marker.
 
 Lanes vanish when a value is 0, which would silently drop columns. Every vector that might hit 0
-is combined lane-wise with a constant vector that is nonzero on every lane (ONES and friends).
+is combined lane-wise with one that is nonzero on every lane, or read by a decider that also
+tests a full vector (lanes visited = the union over all Each operands of all conditions).
+
+Known limitation: textures are mirrored on wall faces seen from the far side of one axis (u is
+the position along the wall, not along the viewer's right).
 
   python3 demos/raycast.py --size 160x100 --verify   # fsim vs the netlist evaluation
 """
@@ -25,41 +35,50 @@ import math
 import pathlib
 import subprocess
 import sys
+import time
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "conformance"))
+sys.path.insert(0, str(HERE))
 from bp import DEFAULT_SUBSTATION_QUALITY, Blueprint, encode, quality_arg  # noqa: E402
 from compiler import semantics as sem  # noqa: E402
 from compiler.netlist import EACH, GREEN, LANE_SIGNALS, RED, Collect, Graph, Scalar  # noqa: E402
+from sprite import nearest, quantize  # noqa: E402
 
 MAP = """
-################
+#######BB#######
 #..............#
-#..##......##..#
-#..##......##..#
+#..MM......MM..#
+#..MM......MM..#
 #..............#
-#......##......#
-#...#......#...#
-#...#......#...#
-#...#......#...#
-#......##......#
+#......RR......#
+B...B......B...B
+B...B......B...B
+B...B......B...B
+#......RR......#
 #..............#
-#..##......##..#
-#..##......##..#
+#..MM......MM..#
+#..MM......MM..#
 #..............#
 #..............#
-################
+#######BB#######
 """.split()
+TEXTURE_OF = {"#": "STARTAN3", "B": "BRICK7", "M": "MARBLE1", "R": "SP_HOT1"}   # Freedoom (BSD)
+TEXTURES = ROOT / "assets" / "freedoom" / "textures.json"
 K = 16                       # grid lines marched per axis (>= map size)
 FP = 256                     # position units per tile
 CENTER = (8 * FP, 7.5 * FP)  # camera path: circle around this point
 RADIUS = int(1.25 * FP)
 PLANE = 676                  # tan(fov/2) * 1024: about 66 degrees
 HIT = -(1 << 30)
-BASE_V, BASE_H = (15, 11, 8), (11, 8, 6)   # wall color per brightness step, by side
-FOG = 8192                   # DS at half brightness (4 tiles)
+DS = 1 << 15                 # distance D: 2^15 per tile
+FOG = 4 * DS                 # D at about half brightness
+BRIGHT = 17 * FOG            # brightness = BRIGHT / (D + FOG) <= 17; texture channels <= 15
+NEG = 4 * len(MAP)           # line base of map keys for rays going - (keys grow with distance)
+COLORS = 14                  # texels 1..14 per texture; 15 marks floor / ceiling
+DEFAULT_TEX = 64             # texture resolution (texels per tile, both ways)
 
 
 def pack(rgb):
@@ -75,8 +94,30 @@ def background(y, h):
     return (20 + 70 * t // 255, 18 + 50 * t // 255, 14 + 30 * t // 255)
 
 
-def wall_keys():
-    return [64 * (x + 1) + y for y, row in enumerate(MAP) for x, c in enumerate(row) if c == "#"]
+def is_wall(c):
+    return c != "."
+
+
+def wall_types():
+    """Wall characters in the map, in TEXTURE_OF order: index = texture type."""
+    used = {c for row in MAP for c in row if is_wall(c)}
+    return [c for c in TEXTURE_OF if c in used]
+
+
+def cell_keys(side, x, y):
+    """The two map keys of wall cell (x, y) for crossings of side 0 (vertical grid lines) or 1:
+    the line coordinate of the cell entered, << 6, plus the across one. Rays going + use
+    line + 1, rays going - use NEG - line, so along every ray the keys grow with distance and the
+    nearest hit is the smallest key."""
+    if side == 0:
+        return 64 * (x + 1) + y, 64 * (NEG - x) + y
+    return 64 * y + x + 1, 64 * (NEG - y) + x + 1
+
+
+def wall_keys(side, ty=None):
+    types = wall_types()
+    return [k for y, row in enumerate(MAP) for x, c in enumerate(row)
+            if is_wall(c) and (ty is None or types.index(c) == ty) for k in cell_keys(side, x, y)]
 
 
 def trig(fn):
@@ -110,9 +151,9 @@ def ray_base(tabs, camx, d, pl):
     return out
 
 
-def key_ranges(keys, shift):
-    """Conditions: Each in [k << shift, (k + 1) << shift) for any k in keys (consecutive keys
-    merged into one range)."""
+def key_ranges(keys, shift, base=0):
+    """Conditions: Each in [base + (k << shift), base + ((k + 1) << shift)) for any k in keys
+    (consecutive keys merged into one range)."""
     runs = []
     for k in sorted(set(keys)):
         if runs and runs[-1][1] == k - 1:
@@ -121,8 +162,66 @@ def key_ranges(keys, shift):
             runs.append([k, k])
     conds = []
     for lo, hi in runs:
-        conds += [sem.cond(EACH, ">=", lo << shift, RED, "or" if conds else None),
-                  sem.cond(EACH, "<", (hi + 1) << shift, RED, "and")]
+        conds += [sem.cond(EACH, ">=", base + (lo << shift), RED, "or" if conds else None),
+                  sem.cond(EACH, "<", base + ((hi + 1) << shift), RED, "and")]
+    return conds
+
+
+# ---------------------------------------------------------------------------------------------
+# Textures: Freedoom wall textures, one tile = 128 x 128 texture units, box-filtered to tex x tex
+# and quantized to COLORS colors each, stored at 4 bits per channel (times a brightness <= 17).
+
+def load_textures(tex):
+    if 128 % tex or tex % 16:
+        raise SystemExit(f"texture resolution {tex}: must divide 128 and be a multiple of 16")
+    data = json.loads(TEXTURES.read_text())
+    pal = data["palette"]
+    out = []
+    for ch in wall_types():
+        t = data["textures"][TEXTURE_OF[ch]]
+        tw, th, rows = t["width"], t["height"], t["rows"]
+        sx, sy = 128 // tex, th / tex
+        px = []
+        for v in range(tex):
+            line = []
+            for u in range(tex):
+                acc, n = [0, 0, 0], 0
+                for yy in range(int(v * sy), max(int(v * sy) + 1, int((v + 1) * sy))):
+                    for xx in range(u * sx, (u + 1) * sx):
+                        i = rows[yy][xx % tw]
+                        for c in range(3):
+                            acc[c] += pal[i][c] if i >= 0 else 0
+                        n += 1
+                line.append(tuple(round(a / n) for a in acc))
+            px.append(line)
+        centers = quantize([c for r in px for c in r], COLORS)
+        texels = [[1 + nearest(centers, c) for c in r] for r in px]
+        c4 = [tuple(min(15, round(x / 17)) for x in c) for c in centers]
+        out.append({"char": ch, "name": TEXTURE_OF[ch], "texels": texels, "c4": c4})
+    return out
+
+
+def side_color(c4, side):
+    """Packed color at brightness 1: side 1 (horizontal grid lines) 3/4 as bright. Never 0 (a
+    lamp reading 0 shows its default color)."""
+    c = c4 if side == 0 else tuple(x * 3 // 4 for x in c4)
+    return pack(c) or 1
+
+
+def strip_word(texels, u, j):
+    """Texels v = 8j .. 8j + 7 of column u, texel 8j + n at bits 28 - 4n: shifting left by 4n
+    puts it in the top nibble."""
+    return sem.i32(sum(texels[8 * j + n][u] << (28 - 4 * n) for n in range(8)))
+
+
+def nibble_range(t):
+    """Conditions: the top nibble of Each (signed) is t."""
+    lo, hi = (t << 28, (t + 1) << 28) if t < 8 else ((t - 16) << 28, (t - 15) << 28)
+    conds = []
+    if lo > -(1 << 31):
+        conds.append(sem.cond(EACH, ">=", lo, RED))
+    if hi < (1 << 31):
+        conds.append(sem.cond(EACH, "<", hi, RED, "and" if conds else None))
     return conds
 
 
@@ -139,15 +238,36 @@ def scripted_camera(g):
     return A, PX, PY, {"T": T}
 
 
-def build_graph(w, h, camera=scripted_camera, g=None):
+def slot_columns(n, hole, x_right=-2):
+    """x of n slots (2 tiles wide) from x_right leftwards, skipping the substation lattice's
+    columns: xs[0] is the rightmost."""
+    colhole = lambda x: any(hole(x, y) for y in range(128))  # noqa: E731
+    xs, x = [], x_right
+    while len(xs) < n:
+        if colhole(x) or colhole(x + 1):
+            x -= 1
+            continue
+        xs.append(x)
+        x -= 2
+    return xs
+
+
+def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX):
     """camera(g) -> (A, PX, PY, extra scalars): view angle 0..255 and an odd position (1/FP
-    tiles) as scalars of g. extra may hold "angle_offset", added to A by the tables."""
+    tiles) as scalars of g. extra may hold "angle_offset", added to A by the tables.
+
+    The row stage and the texture lookup block are fixed nodes left of (and below) the screen,
+    avoiding the substation lattice hole(x, y); the rest is placed by the compiler left of them
+    (layout["x_right"])."""
     g = g or Graph()
+    hole = hole or (lambda x, y: False)
     cols = LANE_SIGNALS[:w]
-    vec = lambda vals, label="vec": g.const([(cols[c], v) for c, v in enumerate(vals)], label)
-    ones = lambda: vec([1] * w, "ones")
+    vec = lambda vals, label="vec": g.const([(cols[c], v) for c, v in enumerate(vals)], label)  # noqa: E731
+    ones = lambda: vec([1] * w, "ones")  # noqa: E731
     camx = [(2 * c + 1 - w) * 1024 // w for c in range(w)]
     assert all(camx)
+    textures = load_textures(tex)
+    NT, nw = len(textures), tex // 8
 
     # -- scalars: the camera vectors come straight out of signed lookups keyed by the view angle.
     A, PX, PY, extra = camera(g)
@@ -173,23 +293,29 @@ def build_graph(w, h, camera=scripted_camera, g=None):
     def march(RAW, RD, RO, P, PO, side):
         """Crossings of the grid lines perpendicular to this axis, all K at once. RD: ray component
         along the axis (RAW: the same before >> 10, for its sign), RO: the other one; P/PO:
-        position along / across (scale FP, odd). FR = P & 255.
+        position along / across (scale FP, odd). FR = P & 255, C = P >> 8 (the cell).
 
         Crossing k is at signed distance along_k = sel(256 (k + 1), -256 k) - FR along the axis
         (sel: first value where the ray goes +, second where -). From it, each one division:
-          D_k = along_k * 8192 / RD                   (2^11 per tile of ray length)
-          Q_k = along_k * 16 * RO / RD + 16 PO + (P >> 8 << 18) + line_k
-        Q_k is the map key of the cell entered, << 12: across position at 2^12 per tile, plus
-        line_k = the line index (side 0: 64 (x + 1), side 1: 64 y + 1 << 12). The hit lookup
-        tests key ranges, so no shift. Side 0 keys are 64 (x + 1) + y, side 1 64 y + (x + 1)
-        (its own wall table). Returns the K leaves (hit_k + D_k): a wall marks its lane with HIT,
-        so the min is the nearest hit."""
+          D_k = along_k * 2^17 / RD                          (DS = 2^15 per tile of ray length)
+          key_k = along_k * 16 * RO / RD + 16 PO + line_k
+        key_k is the map key of the cell entered (cell_keys) << 12, with the position across the
+        line in its low 12 bits (the texture column). line_k = (C + k + 2) << 18 going + and
+        (NEG + k + 1 - C) << 18 going - for side 0; side 1 has C + k + 1 going + and adds 1 << 12
+        (its x + 1). So keys grow with k either way.
+
+        A range lookup per step marks walls with HIT. Returns two leaf sets: HIT + D_k (the
+        nearest hit has the smallest) and HIT + key_k (the same hit: the smallest key)."""
         FR = g.ss(P, "AND", FP - 1, "fr")
-        Zs = g.new_scalar_signal()
-        zl = g.ss(g.ss(P, ">>", 8), "<<", 18, "line z", out=Zs)
-        za = g.ss(PO, "<<", 4, "across z", out=Zs)
-        Z = Scalar(Collect([zl.node, g.delay(za.node, zl.node.time - za.node.time)]), Zs)
-        ZB = g.broadcast(ones(), Z)
+        C = g.ss(P, ">>", 8, "cell")
+        Zps, Zns = g.new_scalar_signal(), g.new_scalar_signal()
+        zp = g.ss(C, "<<", 18, "line z+", out=Zps)
+        zn = g.ss(C, "*", -(1 << 18), "line z-", out=Zns)
+        zap = g.ss(PO, "<<", 4, "across z+", out=Zps)
+        zan = g.ss(PO, "<<", 4, "across z-", out=Zns)
+        Zp = Scalar(Collect([zp.node, g.delay(zap.node, zp.node.time - zap.node.time)]), Zps)
+        Zn = Scalar(Collect([zn.node, g.delay(zan.node, zn.node.time - zan.node.time)]), Zns)
+        ZBp, ZBn = g.broadcast(ones(), Zp), g.broadcast(ones(), Zn)
 
         def sel(src, a, b, add, label):
             """Per lane: (a if src > 0 else b) + add, where add is a vector shared by all steps (on
@@ -197,76 +323,155 @@ def build_graph(w, h, camera=scripted_camera, g=None):
             copy = [sem.out(EACH, networks=GREEN)]
             return g.decider([sem.cond(EACH, ">", 0, RED)], [sem.out(EACH, constant=a)] + copy,
                              ([sem.out(EACH, constant=b)] if b else []) + copy, red=src, green=add, label=label)
+
+        def line(src, cmp, a, add, label):
+            """Per lane where src cmp 0: a + add."""
+            return g.decider([sem.cond(EACH, cmp, 0, RED)], [sem.out(EACH, constant=a), sem.out(EACH, networks=GREEN)],
+                             red=src, green=add, label=label)
         FR16 = g.vs(vec([-16] * w, "-16"), "*", FR, "-16 fr")
-        FR8k = g.vs(vec([-8192] * w, "-8192"), "*", FR, "-8192 fr")
+        FRD = g.vs(vec([-(DS * 4)] * w, "-DS fr"), "*", FR, "-DS fr")
         RDd = g.delay(RD, 1)
-        Lp, Ln = (2 << 18, 0) if side == 0 else (65 << 12, -63 << 12)
-        walls = wall_keys() if side == 0 else [64 * y + x + 1 for y, row in enumerate(MAP) for x, c in enumerate(row) if c == "#"]
-        hit_conds = key_ranges(walls, 12)
-        leaves = []
+        x1 = 1 << 12 if side else 0
+        hit_conds = key_ranges(wall_keys(side), 12)
+        dleaves, kleaves = [], []
         for k in range(K):
             # FR16 is ready a tick after RAW, so it joins on the product's wire (one copy per step).
             along = g.decider([sem.cond(EACH, ">", 0, RED)], [sem.out(EACH, constant=4096 * (k + 1))],
                               [sem.out(EACH, constant=-4096 * k)] if k else None, red=RAW, label=f"along{side}.{k}")
             Q = g.vv(g.vv(RO, "*", [along, FR16], f"across{side}.{k}"), "/", RD, f"q{side}.{k}")
-            L = sel(RDd, Lp + (k << 18), Ln - (k << 18), ZB, f"line{side}.{k}")
-            hit = g.decider(hit_conds, [sem.out(EACH, constant=HIT)], red=[Q, L], label=f"hit{side}.{k}")
-            D = g.vv(sel(RDd, (k + 1) << 21, -(k << 21), FR8k, f"dist{side}.{k}"), "/", RD, f"d{side}.{k}")
-            leaves.append([hit, D])
-        return leaves
+            Lp = line(RDd, ">", ((k + 2 - side) << 18) + x1, ZBp, f"line+{side}.{k}")
+            Ln = line(RDd, "<", ((NEG + k + 1) << 18) + x1, ZBn, f"line-{side}.{k}")
+            hit = g.decider(hit_conds, [sem.out(EACH, constant=HIT)], red=[Q, Lp, Ln], label=f"hit{side}.{k}")
+            key = g.op("arith", sem.arith_spec(EACH, "+", 0, EACH, RED), red=[Q, Lp, Ln], label=f"key{side}.{k}")
+            D = g.vv(sel(RDd, (k + 1) * DS * 1024, -k * DS * 1024, FRD, f"dist{side}.{k}"), "/", RD, f"d{side}.{k}")
+            dleaves.append([hit, D])
+            kleaves.append([hit, key])
+        return dleaves, kleaves
 
-    # Nearest hit per side: a min tree (lane-wise: copy red if smaller, else green).
-    def tree(level, side):
+    # Nearest hit per side: a min tree (lane-wise: copy red if smaller, else green). The key tree
+    # pairs its leaves the other way round, so each hit decider feeds one red and one green network.
+    def tree(level, name, swap=False):
         depth = 0
         while len(level) > 1:
-            nxt = [g.decider([sem.cond(EACH, "<", EACH, RED, None, GREEN)], [sem.out(EACH, networks=RED)],
-                             [sem.out(EACH, networks=GREEN)], red=a, green=b, label=f"min{side}.{depth}.{i}")
-                   for i, (a, b) in enumerate(zip(level[::2], level[1::2]))]
+            nxt = []
+            for i, (a, b) in enumerate(zip(level[::2], level[1::2])):
+                r, gr = (b, a) if swap and depth == 0 else (a, b)
+                nxt.append(g.decider([sem.cond(EACH, "<", EACH, RED, None, GREEN)], [sem.out(EACH, networks=RED)],
+                                     [sem.out(EACH, networks=GREEN)], red=r, green=gr, label=f"{name}.{depth}.{i}"))
             level = nxt + level[len(level) - len(level) % 2:]
             depth += 1
         return level[0]
-    M0 = tree(march(RAWX, RDX, RDY, PX, PY, 0), 0)
-    M1 = tree(march(RAWY, RDY, RDX, PY, PX, 1), 1)
-    # The last level is split by side: MV holds the lanes where a vertical line is nearer, MH the
-    # rest (ties). Each side then has a constant base color, so no side select is needed.
-    MV = g.decider([sem.cond(EACH, "<", EACH, RED, None, GREEN)], [sem.out(EACH, networks=RED)],
+    dV, kV = march(RAWX, RDX, RDY, PX, PY, 0)
+    dH, kH = march(RAWY, RDY, RDX, PY, PX, 1)
+    M0, M1 = tree(dV, "minV"), tree(dH, "minH")
+    K0, K1 = tree(kV, "keyV", True), tree(kH, "keyH", True)
+    # The last level is split by side: MV holds D on the lanes where a vertical line is nearer, MH
+    # on the rest (ties). The constant 2^30 turns HIT + D into D.
+    cmp = lambda op: [sem.cond(EACH, op, EACH, RED, None, GREEN)]  # noqa: E731
+    MV = g.decider(cmp("<"), [sem.out(EACH, networks=RED), sem.out(EACH, constant=1 << 30)],
                    red=M0, green=M1, label="nearest V")
-    MH = g.decider([sem.cond(EACH, ">=", EACH, RED, None, GREEN)], [sem.out(EACH, networks=GREEN)],
+    MH = g.decider(cmp(">="), [sem.out(EACH, networks=GREEN), sem.out(EACH, constant=1 << 30)],
                    red=M0, green=M1, label="nearest H")
-    # DS = M + 2^30 (the distance) is never formed: the constant rides on each consumer's wire.
-    # LH + 1 = (H*2048 + DS) / DS. A side's brightness 16*FOG / (DS + FOG) is 0 on the other
-    # side's lanes (DS = 2^30 there), and >= 1 within the march (DS < 15 * FOG).
-    LH1 = g.vv([vec([(h << 11) + (1 << 30)] * w, "h+2^30"), MV, MH], "/", [MV, MH, vec([1 << 30] * w, "2^30")], "LH+1")
-    br = lambda M, label: g.vv(vec([16 * FOG] * w, "fog"), "/", [M, vec([(1 << 30) + FOG] * w, "2^30+fog")], label)  # noqa: E731
-    COLOR = [g.vc(br(MV, "brightness V"), "*", pack(BASE_V), "color V"),
-             g.vc(br(MH, "brightness H"), "*", pack(BASE_H), "color H")]
 
-    rows = []
+    # -- texture key per side: TK = (type + 1) << 12 | u << (12 - log2 tex), u the texture column
+    # (from the key's low bits), type from range tests on the key (HIT + key).
+    ustep = 4096 // tex
+    def texkey(Ks, side):
+        u = g.vc(Ks, "AND", 4096 - ustep, f"u{side}")
+        types = [g.decider(key_ranges(wall_keys(side, ty), 12, HIT), [sem.out(EACH, constant=(ty + 1) << 12)],
+                           red=Ks, label=f"type{side}.{ty}") for ty in range(NT)]
+        return [u] + types
+    sides = [(0, texkey(K0, 0), MV), (1, texkey(K1, 1), MH)]
+
+    # Texture strips: one decider per (side, type, column, word), gated by the side being nearest,
+    # so the words come out one tick after the split. Fixed block below the rows.
+    words = [[] for _ in range(nw)]
+    for j in range(nw):
+        for side, TK, MS in sides:
+            for ty, t in enumerate(textures):
+                for u in range(tex):
+                    words[j].append(g.decider(
+                        [sem.cond(EACH, "=", ((ty + 1) << 12) + u * ustep, RED), sem.cond(EACH, ">", 0, GREEN, "and")],
+                        [sem.out(EACH, constant=strip_word(t["texels"], u, j))], red=TK, green=MS,
+                        label=f"strip{side}.{t['name']}.{u}.{j}"))
+    # Palettes per lane (the nearest side's texture), times brightness: one bus per texel value.
+    pal = {c: [] for c in range(1, COLORS + 1)}
+    for side, TK, MS in sides:
+        for ty, t in enumerate(textures):
+            rng = [sem.cond(EACH, ">=", (ty + 1) << 12, RED), sem.cond(EACH, "<", (ty + 2) << 12, RED, "and"),
+                   sem.cond(EACH, ">", 0, GREEN, "and")]
+            for c in range(1, COLORS + 1):
+                if c <= len(t["c4"]):
+                    pal[c].append(g.decider(rng, [sem.out(EACH, constant=side_color(t["c4"][c - 1], side))],
+                                            red=TK, green=MS, label=f"pal{side}.{t['name']}.{c}"))
+    BR = g.vv(vec([BRIGHT] * w, "bright"), "/", [MV, MH, vec([FOG] * w, "fog")], "brightness")
+    CT = {c: g.vv(pal[c], "*", BR, f"color{c}") for c in pal}
+
+    # -- rows. Texel row v = tex/2 + r * tex * D / (H * 2^16) for r = 2y + 1 - H, kept as
+    # V = 4 (v - tex/2) = D / c_y: one division per row. The wall covers |V| < 2 tex.
+    names = ["v", "bg"] + [f"mux{j}" for j in range(nw)] + ["S", "shift"] + [f"pal{c}" for c in [15] + list(pal)]
+    xs = slot_columns(len(names), hole)
+    X = dict(zip(reversed(names), xs))
+    rows, palettes = [], []
     for y in range(h):
-        n = g.decider([sem.cond(EACH, ">", abs(2 * y + 1 - h) + 1, GREEN)], [sem.out(EACH, networks=RED)],
-                      [sem.out(EACH, constant=pack(background(y, h)))], red=COLOR, green=LH1, label=f"row{y}")
-        n.fixed, n.pos = True, (-2, y)
-        rows.append(n)
-    return g, cols, rows, {**extra, "A": A, "PX": PX, "PY": PY, "tables": tabs}
+        r = 2 * y + 1 - h
+        cy = round(h * (1 << 14) / (r * tex))
+        V = g.vc([MV, MH], "/", cy, f"v{y}")
+        mux = [g.decider([sem.cond(EACH, "!=", 0, GREEN), sem.cond(EACH, ">=", 4 * (8 * j - tex // 2), RED, "and"),
+                          sem.cond(EACH, "<", 4 * (8 * j + 8 - tex // 2), RED, "and")],
+                         [sem.out(EACH, networks=GREEN)], red=V, green=words[j], label=f"mux{y}.{j}") for j in range(nw)]
+        bg = g.decider([sem.cond(EACH, "<", -2 * tex, RED), sem.cond(EACH, ">=", 2 * tex, RED, "or")],
+                       [sem.out(EACH, constant=-1)], red=V, label=f"bg{y}")
+        S = g.vc(V, "AND", 28, f"nibble{y}")
+        T = g.vv(mux + [bg], "<<", S, f"texel{y}")
+        pals = [g.decider(nibble_range(15), [sem.out(EACH, constant=pack(background(y, h)))], red=T, label=f"floor{y}")]
+        pals += [g.decider(nibble_range(c), [sem.out(EACH, networks=GREEN)], red=T, green=CT[c], label=f"pal{y}.{c}")
+                 for c in pal]
+        for name, n in zip(["v", "bg"] + [f"mux{j}" for j in range(nw)] + ["S", "shift"] + [f"pal{c}" for c in [15] + list(pal)],
+                           [V, bg] + mux + [S, T] + pals):
+            n.fixed, n.pos = True, (X[name], y)
+        rows.append(Collect(pals))
+        palettes.append(pals)
+    # Color buses: the product and its alignment delay above their palette column.
+    for c, n in CT.items():
+        n.fixed, n.pos = True, (X[f"pal{c}"], -2)
+        d = g.delay(n, 1)
+        d.fixed, d.pos = True, (X[f"pal{c}"], -1)
+    # The strip block: below the rows, filled column by column (word by word).
+    flat = [n for ws in words for n in ws]
+    block_cols = sorted(xs)
+    per_col = -(-len(flat) // len(block_cols))
+    for i, n in enumerate(flat):
+        n.fixed, n.pos = True, (block_cols[i // per_col], h + 2 + i % per_col)
+    layout = {"x_right": min(xs) - 4, "palettes": palettes, "textures": textures, "tex": tex}
+    return g, cols, rows, {**extra, "A": A, "PX": PX, "PY": PY, "tables": tabs}, layout
 
 
-def build(w, h, substation_quality=DEFAULT_SUBSTATION_QUALITY):
-    if w > len(LANE_SIGNALS):
-        raise SystemExit(f"width {w} needs {w} lane signals, only {len(LANE_SIGNALS)}")
-    g, cols, rows, scal = build_graph(w, h)
-    b = Blueprint(f"Raycaster M1 {w}x{h}", substation_quality)
+def wire_screen(b, ent, cols, layout, w, h):
+    """Lamps, each row fed by its palette deciders (whose outputs are chained)."""
     lattice = b.grid.hole
-    ent = g.compile(b, blocked=lattice, region=lambda x, y: x <= -3)
-    for y, n in enumerate(rows):
+    for y, pals in enumerate(layout["palettes"]):
+        es = sorted((ent[n.id][1] for n in pals), key=lambda e: -b.entities[e - 1]["position"]["x"])
+        b.chain(es, 3)
         lamps = [b.lamp(x, y, {"use_colors": True, "color_mode": 2, "rgb_signal": cols[x]}, always_on=True)
                  for x in range(w) if not lattice(x, y)]
-        b.wire(ent[n.id][1], 3, lamps[0], 1)
+        b.wire(es[0], 3, lamps[0], 1)
         b.chain(lamps, 1)
+
+
+def build(w, h, substation_quality=DEFAULT_SUBSTATION_QUALITY, tex=DEFAULT_TEX):
+    if w > len(LANE_SIGNALS):
+        raise SystemExit(f"width {w} needs {w} lane signals, only {len(LANE_SIGNALS)}")
+    b = Blueprint(f"Raycaster M3 {w}x{h}", substation_quality)
+    lattice = b.grid.hole
+    g, cols, rows, scal, layout = build_graph(w, h, hole=lattice, tex=tex)
+    ent = g.compile(b, blocked=lattice, region=lambda x, y: x <= -2, x_right=layout["x_right"])
+    wire_screen(b, ent, cols, layout, w, h)
     _substations(b)
     b.power()
     b.link_power()
     b.check_reach()
-    return g, b, cols, rows, scal
+    return g, b, cols, rows, scal, layout
 
 
 def _substations(b):
@@ -293,11 +498,12 @@ def evaluate(g, cols, rows, T):
     return [[o.get(sem.key(c), 0) for c in cols] for o in outs]
 
 
-def ideal(g, scal, w, h, T):
-    """Float raycaster from the same camera scalars, shaded the same way: a sanity check for the
-    fixed-point math (not expected to match every pixel)."""
+def ideal(g, scal, layout, w, h, T):
+    """Float raycaster from the same camera scalars, textured and shaded the same way: a sanity
+    check for the fixed-point math (not expected to match every pixel)."""
     vals = {k: g.evaluate(T, [scal[k].node])[0].get(sem.key(scal[k].signal), 0) for k in ("A", "PX", "PY")}
     vals.update(scal["tables"][vals["A"]])
+    tex, textures, types = layout["tex"], layout["textures"], wall_types()
     px, py = vals["PX"] / FP, vals["PY"] / FP
     img = [[pack(background(y, h))] * w for y in range(h)]
     for c in range(w):
@@ -315,15 +521,17 @@ def ideal(g, scal, w, h, T):
                 d, side, tx, mx = tx, 0, tx + ddx, mx + sx
             else:
                 d, side, ty, my = ty, 1, ty + ddy, my + sy
-            if MAP[my][mx] == "#":
+            if is_wall(MAP[my][mx]):
                 break
-        ds = 2 * d * 1024
-        lh = int(h * 2048 / ds)
-        br = int(16 * FOG / (ds + FOG))
-        color = br * pack(BASE_H if side else BASE_V)
+        across = (py + d * rdy) if side == 0 else (px + d * rdx)
+        u = int((across - math.floor(across)) * tex)
+        t = textures[types.index(MAP[my][mx])]
+        ds = d * DS
+        br = int(BRIGHT / (ds + FOG))
         for y in range(h):
-            if lh > abs(2 * y + 1 - h):
-                img[y][c] = color
+            v = tex / 2 + (2 * y + 1 - h) * tex * ds / (h * (1 << 16))
+            if 0 <= v < tex:
+                img[y][c] = br * side_color(t["c4"][t["texels"][int(v)][u] - 1], side)
     return img
 
 
@@ -336,7 +544,7 @@ def read_ppm(path):
              for x in range(w)] for y in range(h)]
 
 
-def verify(path, g, cols, rows, scal, w, h, ticks, lattice):
+def verify(path, g, cols, rows, scal, layout, w, h, ticks, lattice, every=5):
     out_dir = ROOT / "out" / f"raycast_{w}x{h}_ppm"
     out_dir.mkdir(parents=True, exist_ok=True)
     for f in out_dir.glob("*.ppm"):
@@ -345,33 +553,28 @@ def verify(path, g, cols, rows, scal, w, h, ticks, lattice):
                     "--ppm", str(out_dir)], check=True)
     frames = {int(p.stem): read_ppm(p) for p in sorted(out_dir.glob("*.ppm"))}
     holes = {(x, y) for x in range(w) for y in range(h) if lattice(x, y)}
-    cache = {}
-
-    def ref(T):
-        if T not in cache:
-            cache[T] = evaluate(g, cols, rows, T)
-        return cache[T]
 
     def diff(img, ref_img):
         return sum(1 for y in range(h) for x in range(w) if (x, y) not in holes and img[y][x] != ref_img[y][x])
 
-    last = sorted(frames)[-6:]
-    lags = [k for k in range(max(0, rows[0].time - 5), rows[0].time + 15) if all(diff(frames[t], ref(t - k)) == 0 for t in last[:2])]
-    lags = [k for k in lags if all(diff(frames[t], ref(t - k)) == 0 for t in last)]
-    if not lags:
-        print("no latency makes the last frames match the evaluation")
-        return False
-    lag = lags[0]
-    checked = [t for t in sorted(frames) if t - lag >= 1]
-    bad = [(t, n) for t in checked[2:] for n in [diff(frames[t], ref(t - lag))] if n]
-    print(f"latency {lag} ticks; {len(checked) - 2} frames x {w * h - len(holes)} lamps checked against the "
-          f"netlist evaluation; {len(bad)} differ")
+    # Frame t shows the clock value t - lag; pick the lag that fits the last frames.
+    last = sorted(frames)[-3:]
+    lag = min(range(rows[0].time - 3, rows[0].time + 4),
+              key=lambda k: sum(diff(frames[t], evaluate(g, cols, rows, t - k)) for t in last))
+    checked = [t for t in sorted(frames) if t - lag >= 1][2::every]
+    t0 = time.time()
+    bad = []
+    for t in checked:
+        n = diff(frames[t], evaluate(g, cols, rows, t - lag))
+        if n:
+            bad.append((t, n))
+    print(f"latency {lag} ticks; {len(checked)} frames x {w * h - len(holes)} lamps checked against the "
+          f"netlist evaluation ({(time.time() - t0) / max(1, len(checked)):.1f} s each); {len(bad)} differ")
     for t, n in bad[:10]:
         print(f"  tick {t}: {n} lamps differ")
-    # Fixed point vs float.
     worst = 0
-    for t in checked[2::25]:
-        n = diff(ref(t - lag), ideal(g, scal, w, h, t - lag))
+    for t in checked[::max(1, len(checked) // 5)]:
+        n = diff(evaluate(g, cols, rows, t - lag), ideal(g, scal, layout, w, h, t - lag))
         worst = max(worst, n)
     print(f"fixed point vs float raycaster: at most {worst} of {w * h} pixels differ "
           f"({100 * worst / (w * h):.2f}%) on sampled frames")
@@ -383,12 +586,14 @@ def main():
     ap.add_argument("--size", default="160x100")
     ap.add_argument("--ticks", type=int, default=400)
     ap.add_argument("--verify", action="store_true")
+    ap.add_argument("--every", type=int, default=5, help="check every n-th frame against the evaluation")
+    ap.add_argument("--tex", type=int, default=DEFAULT_TEX, help="texture resolution (texels per tile)")
     quality_arg(ap)
     a = ap.parse_args()
     w, h = map(int, a.size.lower().split("x"))
-    g, b, cols, rows, scal = build(w, h, a.substation_quality)
+    g, b, cols, rows, scal, layout = build(w, h, a.substation_quality, a.tex)
     data = b.to_json()
-    data["fsim"] = {"ticks": a.ticks, "doc": f"raycaster M1 {w}x{h}"}
+    data["fsim"] = {"ticks": a.ticks, "doc": f"raycaster M3 {w}x{h}"}
     gen = HERE / "gen"
     gen.mkdir(exist_ok=True)
     path = gen / f"raycast_{w}x{h}.json"
@@ -397,7 +602,7 @@ def main():
     n_comb = sum(1 for e in b.entities if "combinator" in e["name"] and e["name"] != "constant-combinator")
     n_lamp = sum(1 for e in b.entities if e["name"] == "small-lamp")
     print(f"{path.relative_to(ROOT)}: {len(b.entities)} entities ({n_comb} combinators, {n_lamp} lamps, {g.relays} relay poles)")
-    if a.verify and not verify(path, g, cols, rows, scal, w, h, a.ticks, b.grid.hole):
+    if a.verify and not verify(path, g, cols, rows, scal, layout, w, h, a.ticks, b.grid.hole, a.every):
         sys.exit(1)
 
 

@@ -4,6 +4,9 @@
   python3 tools/wad.py FREEDOOM2.WAD --png out/ TROOA1 ... # dump lumps as PNGs (palette 0)
   python3 tools/wad.py FREEDOOM2.WAD --export assets/freedoom/sprites.json TROOA1 ...
       # palette-indexed JSON (-1 = transparent) plus PLAYPAL 0; what the generators read
+  python3 tools/wad.py FREEDOOM2.WAD --textures [PREFIX]           # wall textures (TEXTURE1/2)
+  python3 tools/wad.py FREEDOOM2.WAD --texture-png out/ BROWN1 ... # composed textures as PNGs
+  python3 tools/wad.py FREEDOOM2.WAD --export-textures assets/freedoom/textures.json BROWN1 ...
 
 As a module: Wad(path).sprite("TROOA1") -> (width, height, leftoffset, topoffset, rows), where
 rows[y][x] is a palette index or None (transparent). Wad.palette is PLAYPAL 0 as RGB tuples.
@@ -40,6 +43,44 @@ class Wad:
         end = names.index("S_END", start)
         return names[start + 1:end]
 
+    def texture_defs(self):
+        """TEXTURE1/TEXTURE2 (Doom format): {name: (width, height, [(x, y, patch name), ...])}."""
+        pd = self.lump("PNAMES")
+        (n,) = struct.unpack_from("<i", pd, 0)
+        pnames = [pd[4 + 8 * i:12 + 8 * i].rstrip(b"\0").decode("ascii").upper() for i in range(n)]
+        out = {}
+        for lump in ("TEXTURE1", "TEXTURE2"):
+            try:
+                d = self.lump(lump)
+            except KeyError:
+                continue
+            (count,) = struct.unpack_from("<i", d, 0)
+            for i in range(count):
+                (off,) = struct.unpack_from("<i", d, 4 + 4 * i)
+                name = d[off:off + 8].rstrip(b"\0").decode("ascii").upper()
+                w, h = struct.unpack_from("<hh", d, off + 12)
+                (np_,) = struct.unpack_from("<h", d, off + 20)
+                patches = []
+                for p in range(np_):
+                    x, y, idx = struct.unpack_from("<hhh", d, off + 22 + 10 * p)
+                    patches.append((x, y, pnames[idx]))
+                out[name] = (w, h, patches)
+        return out
+
+    def texture(self, name):
+        """A wall texture composed from its patches: (width, height, rows), rows[y][x] a palette
+        index or None where no patch covers it."""
+        w, h, patches = self.texture_defs()[name]
+        rows = [[None] * w for _ in range(h)]
+        for px, py, pname in patches:
+            pw, ph, _, _, prow = self.sprite(pname)
+            for y in range(ph):
+                for x in range(pw):
+                    i = prow[y][x]
+                    if i is not None and 0 <= px + x < w and 0 <= py + y < h:
+                        rows[py + y][px + x] = i
+        return w, h, rows
+
     def sprite(self, name):
         """Doom picture format: header, column offsets, then per column a list of posts."""
         d = self.lump(name)
@@ -73,6 +114,25 @@ def main():
             if n.startswith(sys.argv[3]):
                 w, h, l, t, _ = wad.sprite(n)
                 print(f"{n:9} {w}x{h} offset {l},{t}")
+    elif sys.argv[2] == "--textures":
+        for n, (w, h, p) in sorted(wad.texture_defs().items()):
+            if n.startswith(sys.argv[3] if len(sys.argv) > 3 else ""):
+                print(f"{n:9} {w}x{h} {len(p)} patches")
+    elif sys.argv[2] == "--texture-png":
+        out = pathlib.Path(sys.argv[3])
+        out.mkdir(parents=True, exist_ok=True)
+        for n in sys.argv[4:]:
+            w, h, rows = wad.texture(n)
+            write_png(out / f"{n}.png", [[(0, 0, 0, 255) if i is None else (*wad.palette[i], 255) for i in r] for r in rows])
+    elif sys.argv[2] == "--export-textures":
+        path = pathlib.Path(sys.argv[3])
+        out = json.loads(path.read_text()) if path.exists() else {"palette": [list(c) for c in wad.palette]}
+        out.setdefault("textures", {})
+        for n in sys.argv[4:]:
+            w, h, rows = wad.texture(n)
+            out["textures"][n] = {"width": w, "height": h, "rows": [[-1 if i is None else i for i in r] for r in rows]}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(out, separators=(",", ":")) + "\n")
     elif sys.argv[2] == "--png":
         out = pathlib.Path(sys.argv[3])
         out.mkdir(parents=True, exist_ok=True)
