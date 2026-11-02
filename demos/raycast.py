@@ -28,6 +28,8 @@ Everything runs as vectors whose lanes are screen columns (no per-column units):
   things    monsters and items (demos/things.py): per column the nearest thing's box column and
             depth, per lower row its texel; an opaque one in front of the wall kills the wall's
             pixel through V and paints its own color. Timed back from V: no latency.
+  hud       the status bar (demos/hud.py) in the bottom rows: a constant row plus one decider per
+            (digit or face slot, glyph, row); the view above it keeps the full screen's projection.
 
 Lanes vanish when a value is 0, which would silently drop columns. Every vector that might hit 0
 is combined lane-wise with one that is nonzero on every lane, or read by a decider that also
@@ -53,9 +55,11 @@ sys.path.insert(0, str(ROOT / "conformance"))
 sys.path.insert(0, str(HERE))
 from bp import DEFAULT_SUBSTATION_QUALITY, Blueprint, encode, quality_arg  # noqa: E402
 from compiler import semantics as sem  # noqa: E402
-from compiler.netlist import EACH, GREEN, LANE_SIGNALS, RED, Collect, Graph, Scalar  # noqa: E402
-from sprite import DEFAULT_GAMMA, DEFAULT_SATURATION, c4 as to_c4, nearest, quantize  # noqa: E402
+from compiler.netlist import EACH, GREEN, LANE_SIGNALS, RED, Collect, Graph, Node, Scalar  # noqa: E402
+from sprite import DEFAULT_GAMMA, DEFAULT_SATURATION, c4 as to_c4, grade, nearest, quantize  # noqa: E402
+import hud as hd  # noqa: E402
 import things as th  # noqa: E402
+import weapons as wp  # noqa: E402
 
 MAP = """
 #######BB#######
@@ -194,6 +198,10 @@ class Shading:
     def c4(self, rgb):
         return to_c4(rgb, self.gamma, self.saturation)
 
+    def rgb(self, rgb):
+        """An 8-bit color graded the same way (the HUD's colors)."""
+        return grade(rgb, self.gamma, self.saturation)
+
     @classmethod
     def from_args(cls, a):
         return cls(a.gamma, a.saturation, a.fog)
@@ -297,15 +305,40 @@ def flat_word(texels, v, j):
     return sem.i32(sum(texels[v][8 * j + n] << (28 - 4 * n) for n in range(8)))
 
 
-def row_scale(y, h, shade):
-    """Flat sampling for screen row y: K with ray * K = the floor offset in 2^-32 tiles (RAW has
-    the ray at 2^20), and the brightness at that distance (h / |r| tiles)."""
+def row_scale(y, h, shade, proj=None):
+    """Flat sampling for screen row y of a view h rows tall: K with ray * K = the floor offset in
+    2^-32 tiles (RAW has the ray at 2^20), and the brightness at that distance (proj / |r| tiles;
+    proj, the projection height in rows, is h unless the HUD crops the view)."""
+    proj = proj or h
     r = abs(2 * y + 1 - h)
-    return round(h * (1 << 12) / r), shade.bright // (h * DS // r + shade.fog)
+    return round(proj * (1 << 12) / r), shade.bright // (proj * DS // r + shade.fog)
 
 
 def flat_color(c4, br):
     return (pack(c4) * br) or 1
+
+
+def scripted_hud(g, extra):
+    """Status bar values for the scripted demo, from the clock: health sweeps 0..200 (every face),
+    armor 0..200 at half the rate, the current ammo 0..600 in steps of 3, the ammo list likewise."""
+    T = extra["T"]
+    vals = {"health": g.ss(g.ss(T, ">>", 1), "%", 201, "health"),
+            "armor": g.ss(g.ss(T, ">>", 2), "%", 201, "armor"),
+            "ammo": g.ss(g.ss(T, "*", 3), "%", 601, "ammo"),
+            "bullets": g.ss(g.ss(T, "*", 5), "%", 401, "bullets"),
+            "shells": g.ss(T, "%", 101, "shells"),
+            "rockets": g.ss(g.ss(T, ">>", 1), "%", 101, "rockets"),
+            "cells": g.ss(g.ss(T, "*", 7), "%", 601, "cells")}
+    t = max(v.node.time for v in vals.values())
+    hs = g.op("arith", sem.arith_spec(EACH, "+", 0, EACH, RED), red=[g.delay(v.node, t - v.node.time) for v in vals.values()],
+              label="hud state")
+    return hs, {k: v.signal for k, v in vals.items()}
+
+
+def scripted_weapon(g, extra):
+    """The weapon for the scripted demo: every picture in turn, 16 ticks each."""
+    n = wp.picture_count()
+    return g.ss(g.ss(g.ss(extra["T"], ">>", 4), "%", n), "+", 1, "weapon picture")
 
 
 def scripted_camera(g):
@@ -372,12 +405,17 @@ def row_nets(nw, words, flats, tcolors=0):
 
 
 def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX, flat=DEFAULT_FLAT, things=None,
-                shade=None):
+                shade=None, hud=None, weapon=None):
     """camera(g) -> (A, PX, PY, extra scalars): view angle 0..255 and an odd position (1/FP
     tiles) as scalars of g. extra may hold "angle_offset", added to A by the tables, and
     "angle_sub": A counts 2^sub steps per view angle (0..(256 << sub) - 1). It must hold
     "pos0" = (X0, Y0, (ox, oy)) for things: the position as early as possible, PX ~ X0 + ox.
     things: [(x, y, frame)] (demos/things.py), or None. shade: Shading (colors, fog).
+    hud(g, extra) -> (node, {"health": signal, "ammo": signal, "armor": signal}): the status bar's
+    values (demos/hud.py), or None for no bar. The bar takes the bottom rows; the view above it
+    keeps the full screen's projection (proj = h), so it is cropped, not squashed.
+    weapon(g, extra) -> Scalar: the player's weapon picture (a composite id of demos/weapons.py),
+    or None. A compositor per view row (one more tick) puts it in front of everything.
 
     The row stage and the texture lookup block are fixed nodes left of (and below) the screen,
     avoiding the substation lattice hole(x, y); the rest is placed by the compiler left of them
@@ -395,6 +433,9 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
     flats = load_flats(flat, shade) if flat else None
     sprites = th.load(sorted({n for _, _, n in things}), shade) if things else None
     tcolors = len(sprites["colors"]) if things else 0
+    bar = hd.Hud(w, h, shade) if hud else None
+    proj, hv = h, h - (bar.hb if bar else 0)   # projection height; view rows
+    arms = wp.Weapons(w, hv, shade, bar=bool(bar)) if weapon else None
 
     # -- scalars: the camera vectors come straight out of signed lookups keyed by the view angle.
     A, PX, PY, extra = camera(g)
@@ -405,6 +446,7 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
         A = Scalar(g.delay(A.node, lag), A.signal)
     tabs = camera_tables(extra.pop("angle_offset", 0))
     pos0 = extra.pop("pos0", None)
+    hide = extra.pop("hide", None)   # hide(g, i, out): thing i's hide flag (picked-up items), see things.py
     # A may count in 2^sub steps per view angle (finer turning); the tables key on A directly.
     sub = extra.pop("angle_sub", 0)
     look = lambda name, table: g.lookup_scalar(A, {k: table[k >> sub] for k in range(256 << sub)}, 32, name)  # noqa: E731
@@ -504,7 +546,7 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
                    red=M0, green=M1, label="nearest H")
     t_v = MV.time + 1   # the rows' V
     if things:
-        col = th.column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_v, shade)
+        col = th.column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_v, shade, hide)
         DD = th.visible(g, MV, MH, col)
         SC = th.colors_bus(g, DD, col, sprites, t_v)
         wbus = [g.delay(n, t_v - n.time) for n in col["wsum"]]
@@ -553,6 +595,8 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
     fb = flat.bit_length() - 1 if flat else 0
     words_of = [f"w{v}.{j}" for v in range(flat) for j in range(flat // 8)] if flat else []
     names = row_slots(nw, words_of, flat, tcolors)
+    if arms:   # the weapon's deciders, then the compositor next to the screen
+        names += [f"wc{i}" for i in reversed(range(arms.width()))] + ["comp"]
     xs = slot_columns(len(names), hole)
     X = dict(zip(reversed(names), xs))
     if flat:
@@ -560,17 +604,20 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
                 for a, raw in (("x", RAWX), ("y", RAWY))]
         Ps = [g.ss(P, "<<", 24, f"frac {a}") for a, P in (("x", PX), ("y", PY))]
     rows, palettes = [], []
-    for y in range(h):
-        r = 2 * y + 1 - h
-        cy = round(h * (1 << 14) / (r * tex))
+    if arms:
+        WF = weapon(g, extra)
+        Fc = None
+    for y in range(hv):
+        r = 2 * y + 1 - hv
+        cy = round(proj * (1 << 14) / (r * tex))
         V = g.vc([MV, MH], "/", cy, f"v{y}")
         node = {"v": V}
         tpals = []
-        if things and y >= th.first_row(h):
+        if things and y >= th.first_row(hv):
             # A thing's opaque texel in front of the wall adds 2^29 to V: no wall mux or bg fires.
-            node.update(th.row_kill(g, y, h, col, DD))
+            node.update(th.row_kill(g, y, hv, col, DD, proj))
             V = [V, node["kill"]]
-            tnode, tpals = th.row_texels(g, y, h, col, SC, wbus)
+            tnode, tpals = th.row_texels(g, y, hv, col, SC, wbus, proj)
             node.update(tnode)
         mux = [g.decider([sem.cond(EACH, "!=", 0, GREEN), sem.cond(EACH, ">=", 4 * (8 * j - tex // 2), RED, "and"),
                           sem.cond(EACH, "<", 4 * (8 * j + 8 - tex // 2), RED, "and")],
@@ -586,12 +633,12 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
                 for c in pal]
         node.update({f"pal{c}": n for c, n in zip(pal, pals)})
         if not flat:
-            fl = g.decider(nibble_range(15), [sem.out(EACH, constant=pack(background(y, h)))], red=T, label=f"floor{y}")
+            fl = g.decider(nibble_range(15), [sem.out(EACH, constant=pack(background(y, hv)))], red=T, label=f"floor{y}")
             node["pal15"] = fl
             pals = [fl] + pals
         else:
             part = flats["floor" if r > 0 else "ceiling"]
-            ky, br = row_scale(y, h, shade)
+            ky, br = row_scale(y, hv, shade, proj)
             # The raw rays, delayed so the flat texel lands with the wall's.
             at = T.time - 5
             if sums[0].time > at:
@@ -623,10 +670,35 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
                 fpals.append(n)
             pals = fpals + pals
         pals = pals + tpals
+        out = pals
+        if arms:
+            # Weapon overlay: per picture covering this row, a decider outputting its pixels on
+            # the weapon's network (red); the compositor copies those lanes, and the view (green)
+            # on the rest. The weapon deciders also read the view on green (their conditions
+            # don't), so the view's network can run through them to the compositor.
+            t_p = pals[0].time
+            if Fc is None:
+                Fc = g.delay(WF.node, t_p - 1 - WF.node.time)
+                Fc.fixed, Fc.pos = True, (X["wc0"], -1)
+            wcs = []
+            here = arms.rows.get(y, [])
+            # Spread over the block, so both networks run through them with few relay poles.
+            for i, (cid, px) in enumerate(here):
+                i = i * arms.width() // len(here)
+                n = Node(g, "decider", sem.decider_spec([sem.cond(WF.signal, "=", cid, RED)],
+                                                        [sem.out(cols[x], constant=v) for x, v in px]),
+                         red=[Fc], green=pals, time=t_p, label=f"weapon{y}.{cid}")
+                node[f"wc{i}"] = n
+                wcs.append(n)
+            node["comp"] = comp = Node(
+                g, "decider", sem.decider_spec([sem.cond(EACH, "!=", 0, RED), sem.cond(EACH, ">=", -(1 << 31), GREEN, "and")],
+                                               [sem.out(EACH, networks=RED)], [sem.out(EACH, networks=GREEN)]),
+                red=wcs, green=pals, time=t_p + 1, label=f"compose{y}")
+            out = [comp]
         for name, n in node.items():
             n.fixed, n.pos = True, (X[name], y)
-        rows.append(Collect(pals))
-        palettes.append(pals)
+        rows.append(Collect(out))
+        palettes.append(out)
         check_row_reach(X, node, nw, words_of, flat, tcolors)
     # Color buses: the product and its alignment delay above their palette column.
     for c, n in CT.items():
@@ -636,7 +708,7 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
     if things:
         # Thing color products and word sums, with their delays, in the empty thing slots above
         # the first thing row.
-        y0 = th.first_row(h)
+        y0 = th.first_row(hv)
         for c, n in SC.items():
             n.fixed, n.pos = True, (X[f"spal{c}"], y0 - 2)
             d = g.delay(n, 1)
@@ -650,8 +722,22 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
     per_col = -(-len(block) // len(block_cols))
     for i, n in enumerate(block):
         n.fixed, n.pos = True, (block_cols[i // per_col], h + 2 + i % per_col)
-    layout = {"x_right": min(xs) - 4, "palettes": palettes, "textures": textures, "tex": tex, "flats": flats,
-              "flat": flat, "things": things, "sprites": sprites, "shade": shade}
+    # The status bar: its deciders left of the screen in its own rows, landing with the view rows.
+    x_right, bg = min(xs) - 4, {}
+    if bar:
+        hs, sigs = hud(g, extra)
+        xs_h = slot_columns(bar.width(), hole)
+        hrows = bar.build(g, hs, sigs, cols, rows[0].time, hv, xs_h)
+        rows += hrows
+        palettes += bar.nodes
+        bg = {hv + yb: r for yb, r in enumerate(bar.bg)}
+        x_right = min(x_right, min(xs_h) - 4)
+        extra["hud"] = (hs, sigs)
+    if arms:
+        extra["weapon"] = WF
+    layout = {"x_right": x_right, "palettes": palettes, "textures": textures, "tex": tex, "flats": flats,
+              "flat": flat, "things": things, "sprites": sprites, "shade": shade, "hv": hv, "proj": proj,
+              "hud": bar, "bg": bg, "weapon": arms}
     return g, cols, rows, {**extra, "A": A, "PX": PX, "PY": PY, "tables": tabs, "angle_sub": sub}, layout
 
 
@@ -665,24 +751,31 @@ def check_row_reach(X, node, nw, words, flats, tcolors=0):
 
 
 def wire_screen(b, ent, cols, layout, w, h):
-    """Lamps, each row fed by its palette deciders (whose outputs are chained)."""
+    """Lamps, each row fed by its palette deciders (whose outputs are chained). A status bar row
+    also gets its static colors from a constant combinator right of the screen."""
     lattice = b.grid.hole
     for y, pals in enumerate(layout["palettes"]):
         es = sorted((ent[n.id][1] for n in pals), key=lambda e: -b.entities[e - 1]["position"]["x"])
         b.chain(es, 3)
         lamps = [b.lamp(x, y, {"use_colors": True, "color_mode": 2, "rgb_signal": cols[x]}, always_on=True)
                  for x in range(w) if not lattice(x, y)]
-        b.wire(es[0], 3, lamps[0], 1)
+        if es:
+            b.wire(es[0], 3, lamps[0], 1)
         b.chain(lamps, 1)
+        if y in layout["bg"]:
+            x = w if not lattice(w, y) else w + 2
+            c = b.constant(x, y, [(cols[i], v) for i, v in enumerate(layout["bg"][y])])
+            b.wire(c, 1, lamps[-1], 1)
 
 
 def build(w, h, substation_quality=DEFAULT_SUBSTATION_QUALITY, tex=DEFAULT_TEX, flat=DEFAULT_FLAT, things=th.THINGS,
-          shade=None):
+          shade=None, hud=None, weapon=None):
     if w > len(LANE_SIGNALS):
         raise SystemExit(f"width {w} needs {w} lane signals, only {len(LANE_SIGNALS)}")
     b = Blueprint(f"Raycaster M4 {w}x{h}", substation_quality)
     lattice = b.grid.hole
-    g, cols, rows, scal, layout = build_graph(w, h, hole=lattice, tex=tex, flat=flat, things=things, shade=shade)
+    g, cols, rows, scal, layout = build_graph(w, h, hole=lattice, tex=tex, flat=flat, things=things, shade=shade,
+                                              hud=hud, weapon=weapon)
     ent = g.compile(b, blocked=lattice, region=lambda x, y: x <= -2, x_right=layout["x_right"])
     wire_screen(b, ent, cols, layout, w, h)
     _substations(b)
@@ -711,9 +804,24 @@ def _substations(b):
 # ---------------------------------------------------------------------------------------------
 # Reference images
 
-def evaluate(g, cols, rows, T):
-    outs = g.evaluate(T, rows)
-    return [[o.get(sem.key(c), 0) for c in cols] for o in outs]
+def evaluate(g, cols, rows, T, layout=None, inputs=None):
+    """The screen's lamp values from the netlist evaluation (status bar rows: their constant row
+    plus their deciders; a row of None has no deciders)."""
+    outs = iter(g.evaluate(T, [r for r in rows if r is not None], inputs))
+    bg = layout["bg"] if layout else {}
+    img = []
+    for y, r in enumerate(rows):
+        o = next(outs) if r is not None else {}
+        base = bg.get(y)
+        img.append([sem.i32(o.get(sem.key(c), 0) + (base[x] if base else 0)) for x, c in enumerate(cols)])
+    return img
+
+
+def hud_state(g, scal, T=0, inputs=None):
+    """The status bar's values {health, ammo, armor} as the circuit sees them."""
+    hs, sigs = scal["hud"]
+    o = g.evaluate(T, [hs], inputs)[0]
+    return {k: o.get(sem.key(s), 0) for k, s in sigs.items()}
 
 
 def ideal(g, scal, layout, w, h, T):
@@ -723,20 +831,21 @@ def ideal(g, scal, layout, w, h, T):
     vals.update(scal["tables"][vals["A"] >> scal["angle_sub"]])
     tex, textures, types, flats, f = layout["tex"], layout["textures"], wall_types(), layout["flats"], layout["flat"]
     px, py = vals["PX"] / FP, vals["PY"] / FP
-    img = [[pack(background(y, h))] * w for y in range(h)]
+    hv, proj = layout["hv"], layout["proj"]
+    img = [[pack(background(y, hv))] * w for y in range(hv)]
     wall_d = []
     for c in range(w):
         camx = ((2 * c + 1 - w) * 1024 // w) / 1024
         rdx = (vals["DX"] + vals["PLX"] * camx) / 1024
         rdy = (vals["DY"] + vals["PLY"] * camx) / 1024
         if flats:
-            for y in range(h):
-                r = 2 * y + 1 - h
-                d = h / abs(r)
+            for y in range(hv):
+                r = 2 * y + 1 - hv
+                d = proj / abs(r)
                 fx, fy = px + d * rdx, py + d * rdy
                 u, v = int((fx - math.floor(fx)) * f), int((fy - math.floor(fy)) * f)
                 part = flats["floor" if r > 0 else "ceiling"]
-                img[y][c] = flat_color(part["c4"][part["texels"][v][u]], row_scale(y, h, layout["shade"])[1])
+                img[y][c] = flat_color(part["c4"][part["texels"][v][u]], row_scale(y, hv, layout["shade"], proj)[1])
         mx, my = int(px), int(py)
         ddx = abs(1 / rdx) if rdx else 1e30
         ddy = abs(1 / rdy) if rdy else 1e30
@@ -756,12 +865,17 @@ def ideal(g, scal, layout, w, h, T):
         t = textures[types.index(MAP[my][mx])]
         ds = d * DS
         br = int(layout["shade"].bright / (ds + layout["shade"].fog))
-        for y in range(h):
-            v = tex / 2 + (2 * y + 1 - h) * tex * ds / (h * (1 << 16))
+        for y in range(hv):
+            v = tex / 2 + (2 * y + 1 - hv) * tex * ds / (proj * (1 << 16))
             if 0 <= v < tex:
                 img[y][c] = br * side_color(t["c4"][t["texels"][int(v)][u] - 1], side)
     if layout["things"]:
-        th.ideal(img, vals, layout["things"], layout["sprites"], wall_d, w, h, layout["shade"])
+        th.ideal(img, vals, layout["things"], layout["sprites"], wall_d, w, hv, layout["shade"], proj)
+    if layout["weapon"]:
+        F = scal["weapon"]
+        layout["weapon"].overlay(img, g.evaluate(T, [F.node])[0].get(sem.key(F.signal), 0))
+    if layout["hud"]:
+        img += layout["hud"].image(hud_state(g, scal, T))
     return img
 
 
@@ -790,24 +904,28 @@ def verify(path, g, cols, rows, scal, layout, w, h, ticks, lattice, every=5):
     # Frame t shows the clock value t - lag; pick the lag that fits the last frames.
     last = sorted(frames)[-3:]
     lag = min(range(rows[0].time - 3, rows[0].time + 4),
-              key=lambda k: sum(diff(frames[t], evaluate(g, cols, rows, t - k)) for t in last))
+              key=lambda k: sum(diff(frames[t], evaluate(g, cols, rows, t - k, layout)) for t in last))
     checked = [t for t in sorted(frames) if t - lag >= 1][2::every]
     t0 = time.time()
     bad = []
     for t in checked:
-        n = diff(frames[t], evaluate(g, cols, rows, t - lag))
+        n = diff(frames[t], evaluate(g, cols, rows, t - lag, layout))
         if n:
             bad.append((t, n))
     print(f"latency {lag} ticks; {len(checked)} frames x {w * h - len(holes)} lamps checked against the "
           f"netlist evaluation ({(time.time() - t0) / max(1, len(checked)):.1f} s each); {len(bad)} differ")
     for t, n in bad[:10]:
         print(f"  tick {t}: {n} lamps differ")
-    worst = 0
+    worst = bar_bad = 0
+    hv = layout["hv"]
     for t in checked[::max(1, len(checked) // 5)]:
-        n = diff(evaluate(g, cols, rows, t - lag), ideal(g, scal, layout, w, h, t - lag))
-        worst = max(worst, n)
-    print(f"fixed point vs float raycaster: at most {worst} of {w * h} pixels differ "
-          f"({100 * worst / (w * h):.2f}%) on sampled frames")
+        ev, ref = evaluate(g, cols, rows, t - lag, layout), ideal(g, scal, layout, w, h, t - lag)
+        worst = max(worst, sum(1 for y in range(hv) for x in range(w) if ev[y][x] != ref[y][x]))
+        bar_bad += sum(1 for y in range(hv, h) for x in range(w) if ev[y][x] != ref[y][x])
+    print(f"fixed point vs float raycaster: at most {worst} of {w * hv} view pixels differ "
+          f"({100 * worst / (w * hv):.2f}%) on sampled frames")
+    if layout["hud"]:
+        print(f"status bar vs the composed bar: {bar_bad} pixels differ on those frames")
     return not bad
 
 
@@ -821,12 +939,15 @@ def main():
     ap.add_argument("--flat", type=int, default=DEFAULT_FLAT,
                     help="floor/ceiling texture resolution (texels per tile: 8, 16, 32; 0 = untextured)")
     ap.add_argument("--no-things", action="store_true", help="leave out the monsters and items")
+    ap.add_argument("--no-hud", action="store_true", help="leave out the status bar (the view takes the whole screen)")
+    ap.add_argument("--no-weapon", action="store_true", help="leave out the weapon in front of the view")
     quality_arg(ap)
     shading_args(ap)
     a = ap.parse_args()
     w, h = map(int, a.size.lower().split("x"))
     g, b, cols, rows, scal, layout = build(w, h, a.substation_quality, a.tex, a.flat, None if a.no_things else th.THINGS,
-                                               Shading.from_args(a))
+                                           Shading.from_args(a), None if a.no_hud else scripted_hud,
+                                           None if a.no_weapon else scripted_weapon)
     data = b.to_json()
     data["fsim"] = {"ticks": a.ticks, "doc": f"raycaster M3 {w}x{h}"}
     gen = HERE / "gen"

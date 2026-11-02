@@ -49,19 +49,23 @@ QD = 10                    # Zt's depth: alpha >> QD (1/256 tile)
 DIV_SIGMA = round((1 << 20) / 676)   # sigma = alpha * PLANE / 2^20
 NEAR = 1 << 16             # alpha of 1/4 tile: nearer (or behind) things aren't drawn
 KILL = 1 << 29             # added to a killed pixel's V
+HIDE = -(1 << 23)          # added to a hidden thing's depth (column_stage hide)
 FRAME_BITS = 6
 COLORS = 15                # thing texels 1..15, 0 = transparent
 
 # Things on the map: (x, y) in tiles and the sprite frame. Our placement, Freedoom's art.
+# The game (touch.py): monsters are solid and hurt up close, items are picked up. An imp near the
+# start, armor, ammo and a medikit along the south wall (game.py's scripted walk meets them all).
+# The barrel and column gave way to items, 2026-11-02: 8 things fit.
 THINGS = [
     (5.5, 4.5, "TROOA1"),
     (10.5, 7.5, "POSSA1"),
-    (13.5, 8.5, "TROOA1"),
-    (8.0, 2.5, "POSSA1"),
-    (6.5, 10.5, "BAR1A0"),
-    (9.5, 11.5, "MEDIA0"),
-    (2.5, 13.5, "ARM1A0"),
-    (2.5, 1.5, "COLUA0"),
+    (10.1, 10.9, "TROOA1"),
+    (5.2, 12.7, "POSSA1"),
+    (5.6, 13.5, "AMMOA0"),
+    (4.45, 14.65, "MEDIA0"),
+    (7.4, 13.35, "ARM1A0"),
+    (13.5, 13.5, "SBOXA0"),
 ]
 
 
@@ -120,9 +124,10 @@ def key_bits(types):
     return max(((max(types.values()) + 1) << F).bit_length(), 1)
 
 
-def row_divisor(y, h):
-    """cs_y with Vs = Dt / cs_y = 4 STEX z (z below eye level, in tiles), for r = 2y + 1 - h > 0."""
-    return round(h * (1 << 23) / (STEX * (2 * y + 1 - h)))
+def row_divisor(y, h, proj=None):
+    """cs_y with Vs = Dt / cs_y = 4 STEX z (z below eye level, in tiles), for r = 2y + 1 - h > 0
+    (proj: the projection height in rows, h unless the status bar crops the view)."""
+    return round((proj or h) * (1 << 23) / (STEX * (2 * y + 1 - h)))
 
 
 def first_row(h):
@@ -151,9 +156,14 @@ def tree(g, level, name):
     return level[0]
 
 
-def column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_v, shade):
+def column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_v, shade, hide=None):
     """The per-thing scalars, the per-column key/depth vectors and the lookup blocks. Returns a dict
-    of nodes for the row stage (all timed against t_v, the wall V's time)."""
+    of nodes for the row stage (all timed against t_v, the wall V's time).
+
+    hide(g, i, out): a Scalar adding HIDE (or 0) to thing i's depth signal `out`, or None. A hidden
+    thing's depth is behind the camera, so neither leaf passes and it isn't drawn (a picked-up
+    item). |alpha| < 2^23 on a 16-tile map, so alpha - 2^23 stays negative, and its Zt base
+    (alpha >> QD) << KB stays above -2^31 for KB <= 17."""
     if len(things) > 8:
         raise ValueError(f"{len(things)} things: at most 8 fit in the latency budget")
     X0, Y0, (ox, oy) = pos0
@@ -163,13 +173,21 @@ def column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_v, shade)
     fid = {f["name"]: i + 1 for i, f in enumerate(sprites["frames"])}
     types = sprites["types"]
     KB = key_bits(types)
+    if hide and KB > 17:
+        raise ValueError(f"key bits {KB}: a hidden thing's Zt base would overflow")
     zleaves, dleaves = [], []
     for i, (tx, ty, name) in enumerate(things):
         ex, ey = int(tx * 256), int(ty * 256)
         rx = g.ss(ex - ox, "-", X0, f"rx{i}")
         ry = g.ss(ey - oy, "-", Y0, f"ry{i}")
         sa, sl = g.new_scalar_signal(), g.new_scalar_signal()
-        alpha = Scalar(Collect([mul(g, rx, DX, sa, f"a{i}x"), mul(g, ry, DY, sa, f"a{i}y")]), sa)
+        parts = [mul(g, rx, DX, sa, f"a{i}x"), mul(g, ry, DY, sa, f"a{i}y")]
+        hid = hide(g, i, sa) if hide else None
+        if hid is not None:
+            if hid.node.time > parts[0].time:
+                raise ValueError(f"thing {i}: hide flag at {hid.node.time}, depth at {parts[0].time}")
+            parts.append(g.delay(hid.node, parts[0].time - hid.node.time))
+        alpha = Scalar(Collect(parts), sa)
         lat = Scalar(Collect([mul(g, ry, DX, sl, f"l{i}x"), mul(g, rx, NDY, sl, f"l{i}y")]), sl)
         sigma = g.ss(alpha, "/", DIV_SIGMA, f"sigma{i}")
         dc = g.ss(alpha, ">>", QD, f"dc{i}")
@@ -231,9 +249,9 @@ def colors_bus(g, DD, col, sprites, t_v):
     return {c: g.vc(VB, "*", color(c4, 1), f"thing color{c}") for c, c4 in enumerate(sprites["colors"], 1)}
 
 
-def row_kill(g, y, h, col, DD):
+def row_kill(g, y, h, col, DD, proj=None):
     """The kill path of row y: 2^29 where the thing's texel here is opaque and it is in front."""
-    cs = row_divisor(y, h)
+    cs = row_divisor(y, h, proj)
     Q = g.vc(col["Dt"], "/", 4 * cs, f"tq{y}")
     P = g.op("arith", sem.arith_spec(2, "^", EACH, EACH, None, RED), red=[Q], label=f"tp{y}")
     OM = g.vv(col["masks"], "*", P, f"tom{y}")
@@ -242,10 +260,10 @@ def row_kill(g, y, h, col, DD):
     return {"sq": Q, "sp": P, "som": OM, "kill": kill}
 
 
-def row_texels(g, y, h, col, SC, wbus):
+def row_texels(g, y, h, col, SC, wbus, proj=None):
     """The texel path of row y: Vs, a mux per word, a shift, a palette decider per color."""
     Dt = g.delay(col["Dt"], wbus[0].time - 1 - col["Dt"].time)
-    Vs = g.vc(Dt, "/", row_divisor(y, h), f"tv{y}")
+    Vs = g.vc(Dt, "/", row_divisor(y, h, proj), f"tv{y}")
     mux = [g.decider([sem.cond(EACH, "!=", 0, GREEN), sem.cond(EACH, ">=", 32 * j, RED, "and"),
                       sem.cond(EACH, "<", 32 * j + 32, RED, "and")], [sem.out(EACH, networks=GREEN)],
                      red=Vs, green=wbus[j], label=f"tmux{y}.{j}") for j in range(HP // 8)]
@@ -285,7 +303,7 @@ def nets(ncolors):
 # ---------------------------------------------------------------------------------------------
 # Float reference
 
-def ideal(img, vals, things, sprites, wall_d, w, h, shade):
+def ideal(img, vals, things, sprites, wall_d, w, h, shade, proj=None):
     """Draw the things into img (float math): per column the nearest covering thing, per lower row
     its texel where opaque and nearer than the wall (wall_d[c]: perpendicular distance, tiles)."""
     from raycast import DS, PLANE  # noqa: E402
@@ -310,6 +328,6 @@ def ideal(img, vals, things, sprites, wall_d, w, h, shade):
         a, u, f = best
         br = int(shade.bright / (a * DS + shade.fog))
         for y in range(first_row(h), h):
-            t = math.floor((2 * y + 1 - h) * a / (2 * h) * STEX)
+            t = math.floor((2 * y + 1 - h) * a / (2 * (proj or h)) * STEX)
             if 0 <= t < HP and f["texels"][t][u]:
                 img[y][c] = color(sprites["colors"][f["texels"][t][u] - 1], br)

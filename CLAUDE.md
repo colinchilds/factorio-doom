@@ -193,7 +193,109 @@ Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► sp
    - **Cost at 160×100:** about 1,900 combinators (8 things, 6 frames; 14,912 in all), and no
      latency.
 
-Still to come (M4): enemies, shooting, HUD, doors; see "Next steps".
+8. **HUD (status bar, `demos/hud.py`, 2026-11-02):** Freedoom's STBAR in Doom's layout across the
+   bottom `bar_height(H) = round(32 H / 200)` rows (6 / 16 / 32 at 64×40 / 160×100 / 320×200):
+   ammo (the current weapon's; blank for the fist), health %, armor %, the face (5 pain levels and
+   dead, Doom's formula), the ARMS panel (every weapon owned) and the ammo list (all four counts
+   live). Art in `assets/freedoom/hud.json`.
+   - **View crop:** `build_graph(..., hud=...)` renders only `hv = H - bar` view rows (r = 2y + 1
+     - hv) but keeps the full screen's projection (`proj = H` in c_y, `row_scale`, the thing
+     rows): walls keep their size and the view is cropped, as in Doom. Without a HUD hv = proj = H
+     and the blueprint is byte-identical to before.
+   - **Circuit:** per bar row a constant combinator (right of the screen) holds the static row.
+     Per (slot, glyph, bar row) one decider outputs, on the slot's columns, that glyph's row
+     minus the static row: exact 8-bit colors (box-filtered from 320×32 at build time, then
+     graded with `Shading.rgb`), so no palette or texel path. A slot shows at most one glyph.
+     Conditions on three networks one tick from the values HS: hundreds `100g <= N < 100(g+1)` on
+     N, tens `10g <= N%100 < 10g+10` (tens 0 also needs N >= 100 on green), ones `N%10 = g`, face
+     a health range. Leading zeros blank, negative values show nothing; glyph sets come from
+     `MAXIMA` (Doom's limits with a backpack). The game's current-ammo value: per ammo type a
+     decider copies the count while the weapon uses it (the fist: -1), `Each + 0 → CUR` sums them.
+   - **Timing:** HS is delayed to land the deciders on the view rows' tick, so bar and view always
+     show the same frame (raycaster latency unchanged).
+   - **Shared pixels:** Freedoom's digits are 13 wide, so at odd scales two slots can share a
+     screen pixel. It belongs to the slot covering more of it (`Hud._own`); the other slot's glyph
+     doesn't change it, so every pixel is always one valid composite (summed deltas could carry
+     between packed channels). None at 320×200, 27 at 160×100.
+   - **Cost:** 356 / 783 / 1,391 deciders (busiest row 98, left of the screen like the row
+     pipelines), but the bar replaces that many view-row pipelines, so the total drops: 160×100
+     raycaster 14,165 combinators (14,912 before).
+   - **Checks:** `--verify` adds "status bar vs the composed bar": the reference (`Hud.image`)
+     picks glyphs the way Doom's STlib_drawNum does, independently of the deciders.
+
+9. **Weapons (`demos/weapons.py`, 2026-11-02, user request):** seven Freedoom weapons (pistol,
+   shotgun, chaingun, rocket launcher, plasma rifle, BFG, fist; art in
+   `assets/freedoom/weapons.json`), "next weapon" cycles them, and fire plays Doom's animation
+   with its muzzle flash.
+   - **Pictures:** Doom's weapon states (info.c) converted from tics to ticks; the flash layer is
+     composed over the gun at build time, giving 32 composites ("pictures"). Placed like
+     R_DrawPSprite (x = 1 - left offset, top = viewheight / 2 - 68 - top offset in a 320 × 168
+     view, or 200 without the bar), box-filtered to the view (opaque where at least half the
+     footprint is), graded with `Shading.rgb`. No bob.
+   - **Raise/lower on a switch (user request, 2026-11-02):** Doom lowers the gun 6 px a tic to
+     96 below (16 tics, 27 ticks), switches, raises the new one. The ready frames are drawn at
+     `DROPS` = 8 steps of 12 px: 56 more pictures (88 in all), only +22% deciders since a lowered
+     gun covers few rows. (Measured: 4 steps +7%, 16 steps +51% with the busiest row 77.)
+   - **Overlay (`build_graph(..., weapon=...)`):** per (picture, view row) one decider (condition
+     `F = id`) outputs that row's pixels as exact colors on the weapon network. A **compositor**
+     per view row, next to the screen, outputs the weapon's lanes and the view's on the rest:
+     `Each(red) != 0 AND Each(green) >= -2^31` → copy red, else copy green (the green condition
+     makes it visit the view's lanes). So the weapon covers walls, flats and things alike, at one
+     more tick (raycaster 18). The view's network reaches the compositor through the weapon
+     deciders' green inputs (they nominally read it; their conditions don't), so the compiler
+     wires it through the weapon block; each row's deciders are spread over the block's slots.
+   - **Cost:** 469 / 1,184 / 2,347 overlay deciders plus one compositor per view row at 64×40 /
+     160×100 / 320×200; busiest row 51 (the block next to the screen is 51 slots wide).
+   - **State (game):** W (weapon index, 0 = pistol), A (animation tick: 0 ready, 1..L firing,
+     128.. lowering, 155 down, 192.. raising) and D (switches queued) live on the state bus, REG's
+     red output network, held by deciders that read the bus and write back onto it
+     (`weapons.logic`, 10 deciders): queue hold/add/take, weapon hold/next, anim advance (copy A
+     + 1), start (A = 1), lower, down (hold), raise. Fire held from ready starts the cycle if
+     there's ammo; at A = R (Doom's A_ReFire) it restarts while fire is held, else runs on to L
+     and back to 0. Per weapon a spend decider at its shots' A values (with an ammo check each,
+     so the chaingun's second shot) writes `ammo -cost` into REG's input. Relays (`F + 0`,
+     `N + 0`) put fire held and next pressed onto the bus, so every weapon decider reads one
+     network. The raycaster's picture F is a lookup on `W * 256 + A`.
+   - **Switching:** a "next" press adds 1 to D. While D > 0 a ready or firing gun starts lowering
+     (cancelling a shot); down, each tick with D > 0 steps W and takes 1 from D, then the gun
+     rises (and lowers again at once if presses came while it rose). So several quick taps cost
+     one lower and one raise, about 0.9 s. Fire is ignored while switching. Taps closer than
+     the pad's hold (14 ticks) are one press to the pad.
+   - **Checks:** game `--verify` also compares the bus (fsim `--net`) with the reference every
+     tick, and the reference with `weapons.step`, the same rules written as plain Python: 0
+     differ at 64×40, 160×100 and 320×200, frames exact. The real game matches the 64×40 build
+     on 8,545,891 checks (switches, queued taps, fire during a switch); 320×200 runs at 2.09
+     ms/tick in Space Age (1.72 before weapons), 25,747 combinators, blueprint string 3.7 MB. Without a HUD
+     and weapon the raycaster's blueprint is byte-identical to before.
+
+10. **Thing contact (`demos/touch.py`, 2026-11-02, user request):** walk over an item to pick it
+    up, stand near a monster and it hurts; monsters are solid.
+   - **Pickups:** Doom's amounts and caps (`ITEMS`: medikit +25 to 100, green armor sets 100,
+     ammo box +50 bullets to 200, shell box +20 to 50, ...); a full stat leaves the item, as in
+     Doom. Per item a bus flag GONE_i (`signal-0`..`7`, held by one decider copying them all) is
+     set by a decider: player within PICKUP (80/256 tile per axis) of it, not gone, alive, the stat
+     below its cap. The increment `min(amount, cap - value)` needs the value, and deciders only
+     copy or output constants, so it's a bit-sliced constant table over value ranges (like
+     `lookup_scalar`, adjacent ranges merged) gated by the same condition, into REG's input.
+   - **Hidden when gone:** the raycaster reads GONE_i on its port and adds `things.HIDE` (-2^23)
+     to the item's depth (one more term on alpha's wire, delayed to meet the products), so both
+     leaves fail NEAR and it isn't drawn. No latency.
+   - **Pain:** a bus clock COOL (`signal-P`): a monster within REACH (1 tile per axis), COOL = 0
+     and alive -> COOL = COOLDOWN (40); it counts down (copy + -1, while > 1: see the rules below). The tick after it starts
+     (COOL = COOLDOWN) tables over (armor, health) take DAMAGE 9: green armor takes SAVE 3 while
+     it has that much, and health stops at 0 (the face shows dead; nothing else happens yet).
+   - **Solid monsters:** their boxes join the walls in the corner deciders (`player_graph`), at
+     the collision box's half-size (88, so the player's box can't straddle one between its
+     corners). You slide along them like walls.
+   - **Starting ammo** is now below the caps (`hud.START`: 50 bullets, 20 shells, 10 rockets,
+     100 cells) so ammo pickups have room.
+   - **Cost:** 36 deciders for the default 8 things (4 items, 4 monsters), about 1,600 conditions
+     (the armor table is most of it); no latency.
+   - **Checks:** `touch.step` is the same rules in plain Python. game `--verify` compares it with
+     the evaluated bus and REG every tick; the scripted walk takes an unarmored hit, picks up the
+     armor, takes an armored hit, then the ammo box and the medikit.
+
+Still to come (M4): enemies, shooting, doors; see "Next steps".
 
 Earlier notes that still hold:
 
@@ -411,7 +513,8 @@ Freedoom-textured walls (M1: flat-shaded), textured floor and ceiling (`--flat 0
   5,847 / 7,473 / 10,175; M1: 464 / 530 / 632), plus lamps and about 900–1,000 relay poles.
   Of those, 4,096 are strip lookups (4 textures at tex 64), 27 per row for walls and about 55
   per row for flats (32 word deciders, 16 palette deciders). A new frame every tick.
-- **Latency:** 17 ticks from the camera port with the game's camera (M1 16; 23 before the setup
+- **Latency:** 18 ticks from the camera port with the game's camera, 17 without the weapon's
+  compositor (`--no-weapon`; M1 16; 23 before the setup
   rework, 42 before the parallel march); the scripted camera adds its own path.
 - **Checks:**
   - `--verify` compares sampled fsim frames (`--every`) with the netlist evaluation (exact; 0
@@ -469,12 +572,31 @@ The raycaster driven by the pad: walk, turn, slide along walls. Screen, then the
 right, then the player logic below the pad.
 - **State:** one register REG (`Each + 0`, green self-loop) holds X, Y (displacement from
   SPAWN) and R (unbounded turn, in quarter view angles: the view angle is ((R >> 2) + A0) & 255).
+  - **Status bar values (2026-11-02):** REG also holds HEALTH (`signal-H`), ARMOR (`signal-V`)
+    and the ammo counts (bullets `signal-B`, shells `J`, rockets `K`, cells `C`) as offsets from
+    `hud.START` (every weapon, ammo below Doom's caps), which `hud_from_port` adds on the wire
+    (`Each + Each` with a constant).
+  - **Contact state (2026-11-02):** the items' GONE flags and the pain clock COOL on the bus
+    (architecture item 10); their deciders join the weapon columns (bus writers, then the REG
+    writers in columns of `SPEND_ROWS`, snaking so the chain stays short).
+  - **Weapon state (2026-11-02):** W (`signal-G`) and A (`signal-T`) on the state bus, plus the
+    relayed FIRE and NEXT (`signal-N`); see architecture item 9. The weapon deciders sit two
+    columns right of the turn deciders (`wm_pos`): bus writers chained to REG's red output,
+    spend deciders chained to its red input.
   - **Finer turning (user request, 2026-11-01):** 2 view angles per tick (a turn in 2.1 s,
     about 40° per tap) felt stiff. R counts 1,024 per revolution (`ANGLE_SUB`) and turns
     `--turn` (default 3) per tick: 3/8 of the old rate, a turn in 5.7 s. The lookups key on
     `R & 1023` with the `>> 2` folded into the tables (camera `angle_sub`), so no extra tick;
     `lookup_scalar` merges runs of consecutive keys into ranges, so the 4× keys cost few
     extra conditions.
+  - **Turn ramp (user request, 2026-11-02):** 3 a tick was still too coarse to aim (a tap, held
+    14 ticks by the pad, turned 15°). Now `DEFAULT_TURN = (1, 4, 18)`: 1 a tick for the first 18
+    ticks a turn button is held (a tap turns about 5°), then 4 (a turn in 4.3 s); flags
+    `--turn-slow`, `--turn`, `--turn-ramp`. A turn counter TURNC (`signal-L`, `turn_counter`)
+    right below the turn deciders: a decider reading HELD on red, copying its own output on a
+    green loop plus 1 while left or right is held. The four turn deciders read HELD on red and
+    the counter on green (the bus is red-only: REG's green output is its self-loop, and HELD's
+    green output is the pad's internal feedback), so no extra tick.
 - **Player logic:** a netlist graph with **ext inputs**: `Graph.ext(entity, pos, ...)` is an
   entity placed by the caller, feeding the graph at time 0. Here that's REG and the pad's HELD
   network.
@@ -499,21 +621,30 @@ right, then the player logic below the pad.
   `raycast.build_graph(w, h, camera)` takes the camera from the caller; M1's script is
   `scripted_camera`.
 - **Checks (with M3 textures):**
-  - `--verify`: REG matches the reference on every tick, the player box never touches a wall,
+  - `--verify`: REG matches the reference on every tick, the player box never touches a wall or a monster's box,
     and sampled frames match the raycaster evaluation, at 64×40, 160×100 and 320×200.
-  - The 64×40 build (normal substations) matches the game on 4,706,537 checks with things
-    (`harness/run.py --warmup 60`, scripted inserts, 400 ticks; about 4 minutes and a 1 GB dump).
-    With flats only it matched on 4,263,031, without flats on 3,367,999, and M2 on 1,209,416.
+  - The 64×40 build (normal substations) matches the game on 8,569,024 checks with thing contact
+    (two monster hits, armor, ammo and medikit pickups, the turn ramp; 2026-11-02) and the weapons
+    (every weapon switched to, raise/lower, queued taps, most fired, `harness/run.py --warmup 60`, scripted inserts, 700
+    ticks; about 7 minutes and a 2 GB dump; almost all of it is the mod recording every entity,
+    not the game). Before thing contact it matched on 8,545,891. With the status bar alone it matched on 4,627,941
+    (400 ticks). Before the HUD it matched on 4,706,537 with things. With flats only it matched on 4,263,031, without flats on 3,367,999, and M2 on 1,209,416.
+  - With thing contact, 320×200 imports in Space Age fully powered (94,343 entities, 25,780
+    combinators) at 2.53 and 3.23 ms per tick in two runs, noisy (the machine had just run heavy
+    jobs; contact adds about 40 one-lane deciders). With the weapons alone 2.09 ms (94,278
+    entities, 25,747 combinators; network update 1.03 ms of it). With the status bar alone 1.72 ms
+    (22,783 combinators, 24,414 before: the bar replaces 32 view rows).
   - 160×100 imports in Space Age, fully powered, at 0.87 ms per tick with things (0.78 without;
     without flats 0.59; M2 0.40). 320×200: 1.75 ms with things (1.40 without, 1.16 without
     flats, M2 0.88). Blueprint strings 1.0 and 2.6 MB.
-- **Input-to-screen latency:** about 22 ticks (0.37 s) for both turning and walking: pad 3,
-  gate or turn decider into REG 2, raycaster 17 with the lamps.
+- **Input-to-screen latency:** about 23 ticks (0.38 s) for both turning and walking: pad 3,
+  gate or turn decider into REG 2, raycaster 18 with the lamps (22 before the weapon's
+  compositor). Firing: pad 3, relay 1, the animation's start 1, then the raycaster.
   - **History:** about 56 ticks at first (the user felt "almost a full second"), then 27 for
     turning and 35 for walking, then 21 (M2, flat walls), then this.
   - **The raycaster's 17:** angle 1, camera lookups 1, ray products 1, ray shift / sign
     selectors 1, key product 1, key division 1, hit lookup 1, min trees 4, side split 1, strip
-    lookups (and V) 1, mux 1, shift 1, palette 1, lamps 1.
+    lookups (and V) 1, mux 1, shift 1, palette 1, compositor 1 (weapon), lamps 1.
 - **Further cuts if we want them (not done; option B, discussed 2026-11-01):**
   - **Angle ROM:** everything that depends only on view angle and column (ray components, the
     per-step slopes and distance steps, the sign selections) precomputed for all 256 angles in
@@ -552,6 +683,10 @@ Done:
   driven by the pad in the game build.
 - M4 step 1, things (architecture item 7): static Freedoom monsters and items on the map,
   occluded by walls, in the raycaster and the game at no extra latency.
+- M4 HUD (architecture item 8): the Freedoom status bar with live ammo, health, armor and face.
+- M4 weapons (architecture item 9): seven weapons in front of the view, switching, Doom's firing
+  animations and ammo use.
+- M4 thing contact (architecture item 10): pickups, monster pain, solid monsters; the turn ramp.
 
 Commit only when the user asks.
 
@@ -560,7 +695,16 @@ Commit only when the user asks.
 1. **M4, the rest:** things are drawn (item 7); next are enemies (positions and frames from a
    state register instead of constants: `column_stage` takes scalars, and the box per sprite type
    already fits every frame), shooting (hitscan on the center column: the nearest thing there is
-   on `Zt`/`Dt`), HUD, doors. M5 (stretch): angled walls, varying heights.
+   on `Zt`/`Dt`), doors. M5 (stretch): angled walls, varying heights.
+   - HUD follow-ups: the face looking left/right and its pain/ouch frames, keys, owned weapons
+     in the ARMS panel once there are pickups; all are more slots of the same kind.
+   - Weapon follow-ups: hitscan reads W and the shot ticks (spend deciders' conditions);
+     pickups (weapons owned, ammo); the walking bob (it moves sideways too: about 10× the
+     pictures, or a different way to draw the gun); Doom's muzzle light (A_Light1 brightens the view: a brightness term on
+     the bus); the chainsaw and super shotgun.
+   - Contact follow-ups: death (freeze the controls at health 0, and a restart: REG can't be
+     cleared by itself, it needs every value negated into its input), Doom's blue armor class
+     (absorbs a half; one class now), the face's ouch frame on a hit.
    - Thing follow-ups: more than 8 things (a fourth tree level costs a tick, or sort by depth on
      scalars); a second nearest layer so overlapping things don't cut each other; things taller
      than eye level (they'd need upper-half rows).
@@ -577,6 +721,10 @@ Commit only when the user asks.
   game, make fsim match, and refresh the golden dump. Several obvious guesses turned out wrong:
   the min tie order, lanes when red + green sums to 0, wire reach being measured footprint to
   footprint, and lamp color lagging its condition by one tick less.
+- **A decider whose outputs on one signal sum to 0** (copy X plus a constant -X) shows that signal
+  at 0 in the game's `signals_last_tick`; fsim leaves it out (seen on the pain clock, 2026-11-02:
+  2 of 8.5M checks). Networks behaved the same, but keep such sums from reaching 0 (count down
+  while > 1, not > 0) rather than rely on it.
 - **Pole-to-pole circuit wires are measured center to center** (≤ 9 for medium poles), not
   footprint to footprint (`pole_reach` case). A relay chain spaced by footprint gap silently
   lost its wires in the game. `Blueprint.check_reach()` checks both rules; call it on every

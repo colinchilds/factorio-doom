@@ -24,8 +24,11 @@ The tools so far:
   (`compiler/`), which balances latency, places and wires the circuit, and evaluates it as the
   reference.
 - **The game** (`demos/game.py`): the raycaster driven by a chest input pad (god mode, drop
-  items with Z): walk, turn, slide along walls. Freedoom monsters and items stand on the map
-  (`demos/things.py`), hidden behind nearer walls.
+  items with Z): walk, turn (slowly at first, for aiming), slide along walls. Freedoom monsters
+  and items stand on the map (`demos/things.py`), hidden behind nearer walls; monsters are solid
+  and hurt you up close, items are picked up (`demos/touch.py`). A Freedoom status bar (`demos/hud.py`) shows
+  ammo, health, armor and the face. Seven Freedoom weapons (`demos/weapons.py`): the gun in front
+  of the view, "next weapon" switches, fire plays Doom's animation and uses ammo.
 - **Demos** (`demos/`): `gradient.py` builds a 16×16 lamp screen laid out like the planned
   renderer's row stage. fsim and the game agree on it lamp for lamp.
 
@@ -61,6 +64,10 @@ python3 demos/raycast.py --size 64x40 --tex 32 --verify --every 1   # smaller te
 python3 demos/raycast.py --size 160x100 --flat 0   # untextured floor/ceiling (cheaper); --flat 8/16/32
 python3 demos/game.py --size 320x200 --gamma 0.4 --fog 12   # brighter screen (--gamma 1 --saturation 1 --fog 4: Freedoom's colors)
 python3 demos/raycast.py --size 160x100 --no-things   # without the monsters and items (also game.py)
+python3 demos/game.py --size 160x100 --no-hud      # without the status bar: the view takes the whole screen
+python3 demos/game.py --size 160x100 --no-weapon   # without the weapon (and its compositor: one tick less)
+python3 demos/weapons.py                           # weapon timelines and the overlay's cost per size
+python3 demos/game.py --size 160x100 --turn-slow 1 --turn 4 --turn-ramp 18   # turning: per tick, slow then fast
 python3 harness/run.py --warmup 60 out/dir -o dump.json   # deep pipelines: settle before t0
 # Substations default to legendary (28x28 supply, fewer dead pixels). Game checks without the
 # DLC need normal ones; with the DLC: harness/run.py --dlc --bench 30 demos/gen/raycast_160x100.json
