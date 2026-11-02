@@ -19,7 +19,7 @@ The tools so far:
 - **Sprite demo** (`demos/sprite.py`): a Freedoom monster (BSD-licensed art, `assets/freedoom/`)
   walking toward the camera, drawn by combinators at any `--size`. The `.txt` file it writes is a
   blueprint string to paste into the game.
-- **Raycaster** (`demos/raycast.py`): M1, flat-shaded walls rendered entirely by about 640
+- **Raycaster** (`demos/raycast.py`): M1, flat-shaded walls rendered entirely by about 530
   combinators at any `--size`, built with the netlist compiler (`compiler/`), which balances
   latency, places and wires the circuit, and evaluates it as the reference.
 - **Demos** (`demos/`): `gradient.py` builds a 16×16 lamp screen laid out like the planned
@@ -94,6 +94,7 @@ Each of these was measured in the game and is checked by a conformance case.
 | Arithmetic | int32 that wraps. `/` and `%` truncate toward zero; x/0 → 0, `INT_MIN / -1` → 0. Shift amounts are masked to 5 bits, and `>>` keeps the sign. `^` wraps; a negative exponent gives 0 unless the base is ±1. |
 | Named output from `Each` | Arithmetic sums the lanes, wrapping. A decider outputs constant × the matching lane count, or the sum of the matching lanes' values when copying from input. |
 | Decider else-output | Per lane: lanes that fail the condition get the else outputs. With no lanes at all, neither branch outputs. |
+| Decider `Each` ranges and outputs | Several `Each` conditions in one decider are evaluated per lane together, so `lo <= Each AND Each < hi OR ...` is a per-lane range lookup. Several outputs on the same lane add up: `Each = constant` plus `Each` copied from a wire gives constant + value, in either branch (`decider_ranges` case). |
 | Decider logic | AND binds tighter than OR. `Everything` is vacuously true and `Anything` is false when there are no inputs. `Everything` output under `Each` conditions gives nothing. |
 | Selector | Ties keep the game's internal signal order when selecting the max; the min list is the max list reversed. `index_comparator` supports `<`, `<=` and so on (N-highest / N-lowest). The index can come from a signal on either wire; a negative index gives nothing. Count and time modes are also covered. |
 | Signal order | The game's internal order (items, fluids, virtual, recipes, entities, …), saved in `conformance/signal_order.json`. Vanilla has **2,878 signal lanes** (1,439 signals × normal / quality-unknown). |

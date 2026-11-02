@@ -6,16 +6,17 @@ Player state is one register, REG: an arithmetic combinator `Each + 0` that adds
 (green loop) to the increments on its red input. It holds X and Y (displacement from SPAWN, 1/FP
 tiles) and R (turn, 256 per revolution, unbounded; the view angle is (R + A0) & 255).
 
-Player logic (a netlist graph, ext inputs REG and the pad's HELD network) computes, from state
-and buttons L ticks old:
-    fw   = +1 forward, -1 back;  turn = +TURN right, -TURN left (a combo does both)
-    V    = SPEED * (cos, sin)(angle) * fw, a lookup keyed by angle + 256 * fw
-    the player is a box of half-size BOX = MARGIN + (L + 1) * SPEED (L: the ticks the logic runs
-    behind the register, so the box covers how far REG moves meanwhile). Each axis separately: if
-    the box's leading edge after the step is in a wall, on either row (column) the box spans,
-    that axis' increment is 0, so you slide along walls and can't cut corners.
-    INC  = X, Y increments -> REG             so REG(t) = REG(t-1) + f(REG(t-1-L), HELD(t-1-L))
-    turn deciders -> REG directly              + turn(HELD(t-2)): turning skips the collision path
+Player logic (a netlist graph, ext inputs REG and the pad's HELD network). Nothing on the input
+path waits for collision; from REG, every tick, whatever is held (lat = 2 ticks behind REG):
+    V+, V-   the step forward and back for the current angle, SPEED * (cos, sin)
+    corners  for each corner of the player's box (half-size BOX = MARGIN + (lat + 2) * SPEED, so
+             it covers how far REG moves meanwhile): in a wall? Range tests on X and Y.
+    gates    per axis and direction: button held, the step's component points that way, and both
+             box corners on that side are free -> the component goes into REG. Each axis alone,
+             so you slide along walls and can't cut corners.
+    turn     deciders -> REG directly.
+    REG(t) = REG(t-1) + gates(HELD(t-2), REG(t-2-lat)) + turn(HELD(t-2)): a press shows up in REG
+    two ticks after HELD, walking or turning.
 
 The raycaster (demos/raycast.py build_graph) takes its camera from REG through a relay line over
 the top of the screen to a pole left of it (its ext input).
@@ -38,7 +39,7 @@ sys.path.insert(0, str(HERE))
 from bp import DEFAULT_SUBSTATION_QUALITY, Blueprint, encode, quality_arg, sig  # noqa: E402
 from compiler import netlist  # noqa: E402
 from compiler import semantics as sem  # noqa: E402
-from compiler.netlist import EACH, RED, Collect, Graph, Scalar  # noqa: E402
+from compiler.netlist import EACH, GREEN, RED, Graph, Node  # noqa: E402
 import input_pad  # noqa: E402
 import raycast  # noqa: E402
 from raycast import FP, MAP, trig  # noqa: E402
@@ -49,90 +50,95 @@ SPAWN = (int(8.5 * FP), int(12.5 * FP))
 A0 = 192           # spawn facing north (angle 0 is east, angles grow clockwise on screen)
 SPEED = 10         # 1/FP tiles per tick while walking: 2.3 tiles a second
 TURN = 2           # angle units per tick: a turn in 2.1 seconds
-MARGIN = 48        # player box half-size (1/FP tiles), plus the latency allowance
+MARGIN = 48        # player box half-size (1/FP tiles), before the latency allowance
 
 
 def walls():
     return [(x, y) for y, row in enumerate(MAP) for x, c in enumerate(row) if c == "#"]
 
 
-def velocity(k):
-    """Lookup key k = (R & 255) + 256 * fw (fw -1, 0, 1) -> per-tick velocity (vx, vy)."""
-    fw, a = (k + 256) // 256 - 1, k % 256
+def velocity(a, fw=1):
+    """Per-tick step (vx, vy) for lookup key a = R & 255, walking forward (fw 1) or back (-1)."""
     t = 2 * math.pi * ((a + A0) % 256) / 256
     return round(SPEED * math.cos(t)) * fw, round(SPEED * math.sin(t)) * fw
 
 
-def player_graph(reg, reg_pos, held, held_pos, inc_pos, turn_pos, box):
-    """The player logic. Returns (graph, nodes) with nodes S, H (ext) and INC (fixed sink).
+def wall_runs():
+    """The walls as horizontal runs (x0, x1, y), for range conditions."""
+    runs = []
+    for x, y in sorted(walls(), key=lambda c: (c[1], c[0])):
+        if runs and runs[-1][2] == y and runs[-1][1] == x - 1:
+            runs[-1][1] = x
+        else:
+            runs.append([x, x, y])
+    return runs
 
-    The player is a box of half-size `box`. Per axis: the leading edge after this tick's step,
-    P + V + sign(V) * box, against the two cells the box spans on the other axis (Q +- box):
-    a wall there zeroes the step. Lookup tables keyed by angle and fw give V + C1 (the step) and
-    V + sign(V) * box + C2 (the probe), offset so the bit-sliced lookups only see positive values;
-    the blocked case outputs C1, and INC (Each - C1) removes it."""
+
+def player_graph(reg, reg_pos, held, held_pos, gate_pos, turn_pos, box):
+    """The player logic. Returns (graph, nodes) with nodes S, H (ext), gates and turn (fixed
+    sinks feeding REG), and lat: how many ticks the gates' REG-derived inputs run behind REG.
+
+    Nothing on the input path waits for collision. From REG, every tick and whatever is held:
+      V+, V-   the step forward and back for the current angle (signed lookups on R & 255);
+      corners  for each corner of the player's box (half-size `box`): is it in a wall? Range
+               tests on X and Y straight from REG (one decider per corner).
+    The gates then pass a step when its button is held and the box's two corners on that side are
+    free: per axis and direction, (W held, V+x > 0, both +x corners free) or (W held, V+x < 0,
+    both -x corners free) -> copy V+x into REG. Each axis is gated alone, so you slide along walls.
+    A press reaches REG in two ticks, like a turn."""
     g = Graph(reserved=[SX, SY, SR] + [sig(s) for s in input_pad.BUTTON_SIGNALS])
     S = g.ext(reg, reg_pos, label="REG")
     H = g.ext(held, held_pos, size=(1, 2), label="HELD")
-
-    def buttons(plus, minus, value, label, o=None):
-        o = o or g.new_scalar_signal()
-        a = g.decider([sem.cond(sig(plus), ">", 0, RED)], [sem.out(o, constant=value)], red=H, label=label + "+")
-        b = g.decider([sem.cond(sig(minus), ">", 0, RED)], [sem.out(o, constant=-value)], red=H, label=label + "-")
-        return Scalar(Collect([a, b]), o)
-
-    fw = buttons(input_pad.FORWARD, input_pad.BACK, 256, "fw")
-    C1, C2 = SPEED + 1, SPEED + box   # C1 > |V|: every value INC sees is positive
-    # Turning needs no collision check: these feed REG directly (fixed, next to it), so a turn
-    # shows up two ticks after HELD instead of L + 1.
+    # Turning: straight from HELD into REG.
     turn = [g.decider([sem.cond(sig(input_pad.RIGHT), ">", 0, RED)], [sem.out(SR, constant=TURN)], red=H, label="turn+"),
             g.decider([sem.cond(sig(input_pad.LEFT), ">", 0, RED)], [sem.out(SR, constant=-TURN)], red=H, label="turn-")]
     for i, n in enumerate(turn):
         n.fixed, n.pos = True, (turn_pos[0], turn_pos[1] + i)
     X, Y, R = g.scalar(S, SX), g.scalar(S, SY), g.scalar(S, SR)
-    key = g.ss(g.ss(R, "AND", 255, "angle"), "+", fw, "move key")
-    keys = range(-256, 512)
-    bits = lambda top: max(1, top.bit_length())  # noqa: E731
-    sgn = lambda v: (v > 0) - (v < 0)  # noqa: E731
-    out = {}
-    for i, (step_sig, name) in enumerate(((SX, "x"), (SY, "y"))):
-        step = {k: velocity(k)[i] + C1 for k in keys}
-        probe = {k: velocity(k)[i] + sgn(velocity(k)[i]) * box + C2 for k in keys}
-        out[name] = (g.lookup_scalar(key, step, bits(2 * C1), f"step {name}", out=step_sig),
-                     g.lookup_scalar(key, probe, bits(2 * C2), f"probe {name}"))
-    P = {"x": g.ss(X, "+", SPAWN[0] - C2, "px-C2"), "y": g.ss(Y, "+", SPAWN[1] - C2, "py-C2")}
-    Pc = {"x": g.ss(X, "+", SPAWN[0], "px"), "y": g.ss(Y, "+", SPAWN[1], "py")}
-    span = {a: (g.ss(g.ss(Pc[a], "-", box), ">>", 8, f"{a} lo"), g.ss(g.ss(Pc[a], "+", box), ">>", 8, f"{a} hi"))
-            for a in "xy"}
-    wl = walls()
-    slides = []
-    for a, other in (("x", "y"), ("y", "x")):
-        step, probe = out[a]
-        lead = g.ss(g.ss(P[a], "+", probe), ">>", 8, f"lead {a}")
-        lo, hi = span[other]
-        conds = []
-        for cx, cy in wl:
-            c_lead, c_other = (cx, cy) if a == "x" else (cy, cx)
-            for q in (lo, hi):
-                conds += [sem.cond(lead.signal, "=", c_lead, RED, "or" if conds else None),
-                          sem.cond(q.signal, "=", c_other, RED, "and")]
-        blk_sig = g.new_scalar_signal()
-        blk = g.decider(conds, [sem.out(blk_sig, constant=1)], red=[lead.node, lo.node, hi.node], label=f"wall {a}")
-        slides.append(g.decider([sem.cond(blk_sig, "=", 0, RED)], [sem.out(step.signal, networks=RED)],
-                                [sem.out(step.signal, constant=C1)], red=[blk, step.node], label=f"slide {a}"))
-    # Each - C1 only touches lanes that are present: an empty pipeline (at build time) adds nothing.
-    INC = g.op("arith", sem.arith_spec(EACH, "-", C1, EACH, RED), slides, [], "INC")
-    INC.fixed, INC.pos = True, inc_pos
-    return g, {"S": S, "H": H, "INC": INC, "turn": turn}
+    A = g.ss(R, "AND", 255, "angle")
+    V = {fw: [g.lookup_scalar(A, {a: velocity(a, fw)[i] for a in range(256)}, 32, f"v{fw:+d} {'xy'[i]}", out=s)
+              for i, s in enumerate((SX, SY))] for fw in (1, -1)}
+    # Corner (sx, sy) of the box is in a wall: X + SPAWN + sx*box in [256 x0, 256 (x1 + 1)) and the
+    # same for Y, for some wall run.
+    corner = {}
+    for sx in (1, -1):
+        for sy in (1, -1):
+            ox, oy = SPAWN[0] + sx * box, SPAWN[1] + sy * box
+            conds = []
+            for x0, x1, y in wall_runs():
+                conds += [sem.cond(SX, ">=", 256 * x0 - ox, RED, "or" if conds else None),
+                          sem.cond(SX, "<", 256 * (x1 + 1) - ox, RED, "and"),
+                          sem.cond(SY, ">=", 256 * y - oy, RED, "and"),
+                          sem.cond(SY, "<", 256 * (y + 1) - oy, RED, "and")]
+            s = g.new_scalar_signal()
+            corner[sx, sy] = (s, g.decider(conds, [sem.out(s, constant=1)], red=S, label=f"corner {sx:+d}{sy:+d}"))
+    lat = V[1][0].node.time
+    cnodes = [g.delay(n, lat - n.time) for _, n in corner.values()]
+    gates = []
+    for fw, button in ((1, input_pad.FORWARD), (-1, input_pad.BACK)):
+        for i, out_sig in enumerate((SX, SY)):
+            conds = []
+            for d in (1, -1):
+                free = [corner[(d, o) if i == 0 else (o, d)][0] for o in (1, -1)]
+                conds += [sem.cond(sig(button), ">", 0, RED, "or" if conds else None),
+                          sem.cond(out_sig, ">" if d > 0 else "<", 0, GREEN, "and")]
+                conds += [sem.cond(c, "=", 0, GREEN, "and") for c in free]
+            # Built directly (no latency balancing): HELD is read as it is now, V and the corners
+            # lat ticks behind REG.
+            n = Node(g, "decider", sem.decider_spec(conds, [sem.out(out_sig, networks=GREEN)]),
+                     red=[H], green=V[fw][0].node.nodes + V[fw][1].node.nodes + cnodes, time=lat + 1, label=f"gate {fw:+d} {'xy'[i]}")
+            n.fixed, n.pos = True, (gate_pos[0], gate_pos[1] + len(gates))
+            gates.append(n)
+    return g, {"S": S, "H": H, "gates": gates, "turn": turn, "lat": lat}
 
 
 def camera_from(port, port_pos):
     def camera(g):
         S = g.ext(port, port_pos, size=(1, 1), connectors=(1, 2), label="state port")
-        A = g.ss(g.ss(g.scalar(S, SR), "+", A0), "AND", 255, "view angle")
+        A = g.ss(g.scalar(S, SR), "AND", 255, "view angle")   # A0 is folded into the tables
         PX = g.ss(g.ss(g.scalar(S, SX), "+", SPAWN[0]), "OR", 1, "px")
         PY = g.ss(g.ss(g.scalar(S, SY), "+", SPAWN[1]), "OR", 1, "py")
-        return A, PX, PY, {"port": S}
+        return A, PX, PY, {"port": S, "angle_offset": A0}
     return camera
 
 
@@ -168,23 +174,22 @@ def build(w, h, n=None, hold=input_pad.DEFAULT_HOLD, substation_quality=DEFAULT_
     b.wire(reg, GREEN_OUT, reg, GREEN_IN)
     d1 = b.entities[pad["d1"] - 1]["position"]
     held_pos = (int(d1["x"]), int(d1["y"] - 1))
-    inc_pos = (reg_pos[0], reg_pos[1] + 2)
+    gate_pos = (reg_pos[0], reg_pos[1] + 1)
     turn_pos = (reg_pos[0] + 2, reg_pos[1])
 
-    def make(probe):
-        return player_graph(reg, reg_pos, pad["d1"], held_pos, inc_pos, turn_pos, probe)
+    def make(box):
+        return player_graph(reg, reg_pos, pad["d1"], held_pos, gate_pos, turn_pos, box)
 
     g, nodes = make(MARGIN)
-    lat = nodes["INC"].time
-    probe = MARGIN + (lat + 1) * SPEED   # the box: the margin, plus how far REG moves meanwhile
+    lat = nodes["lat"]
+    # The box: the margin, plus how far REG moves between the REG value a gate's inputs come
+    # from and the REG value its step lands in (lat + 2 steps).
+    probe = MARGIN + (lat + 2) * SPEED
     g, nodes = make(probe)
-    assert nodes["INC"].time == lat
     pre = b.occupied()
-    tmax = lat - 1
     ent_p = g.compile(b, blocked=lambda x, y: (x, y) in pre,
-                      region=lambda x, y: x >= w + 4 and y >= pad_bottom + 3, x_right=w + 4 + 3 * tmax)
-    b.wire(ent_p[nodes["INC"].id][1], RED_OUT, reg, RED_IN)
-    for n in nodes["turn"]:
+                      region=lambda x, y: x >= w + 4 and y >= pad_bottom + 3, x_right=w + 4 + 3 * lat)
+    for n in nodes["gates"] + nodes["turn"]:
         b.wire(ent_p[n.id][1], RED_OUT, reg, RED_IN)
 
     # Raycaster, camera from a pole left of the screen that the line from REG feeds.
@@ -243,12 +248,15 @@ def reference_states(pad, g, nodes, inserts, ticks, hold, lat):
     inc_cache = {}
     for t in range(ticks):
         prev = state[t - 1] if t else {k: 0 for k in keys}
-        src = t - 1 - lat
+        # A gate's output in REG(t) read HELD(t - 2) and V/corners computed from REG(t - 2 - lat).
+        src = t - 2 - lat
         if src >= 0:
             s_in = {k: v for k, v in state[src].items() if v}
-            ck = (tuple(sorted(s_in.items())), tuple(sorted(hvec(src).items())))
+            ck = (tuple(sorted(s_in.items())), tuple(sorted(hvec(t - 2).items())))
             if ck not in inc_cache:
-                inc_cache[ck] = g.evaluate(0, [nodes["INC"]], {nodes["S"]: s_in, nodes["H"]: hvec(src)})[0]
+                inc_cache[ck] = {}
+                for o in g.evaluate(0, nodes["gates"], {nodes["S"]: s_in, nodes["H"]: hvec(t - 2)}):
+                    sem.add_into(inc_cache[ck], o)
             inc = inc_cache[ck]
         else:
             inc = {}

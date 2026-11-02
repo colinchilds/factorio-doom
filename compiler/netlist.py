@@ -160,15 +160,22 @@ class Graph:
 
     def lookup_scalar(self, a, table, bits, label="", out=None):
         """table[a] for a scalar a, as bit-sliced deciders: one per output bit, each an OR of the
-        keys with that bit set, outputting the bit's weight. All bits land on one signal."""
+        keys with that bit set, outputting the bit's weight. All bits land on one signal.
+
+        bits=32 takes negative values as they are (two's complement: bit 31 weighs -2^31). Bits
+        with the same key set share one decider outputting their summed weight, so the sign bits
+        of a signed table cost one decider."""
         out = out or self.new_scalar_signal()
-        nodes = []
+        groups = {}
         for b in range(bits):
-            keys = [k for k, v in table.items() if (v >> b) & 1]
+            keys = tuple(k for k, v in table.items() if (v >> b) & 1)
             if keys:
-                conds = [sem.cond(a.signal, "=", k, RED, "or" if i else None) for i, k in enumerate(keys)]
-                spec = sem.decider_spec(conds, [sem.out(out, constant=sem.i32(1 << b))])
-                nodes.append(self.op("decider", spec, [a.node], [], f"{label} bit{b}"))
+                groups.setdefault(keys, []).append(b)
+        nodes = []
+        for keys, bs in groups.items():
+            conds = [sem.cond(a.signal, "=", k, RED, "or" if i else None) for i, k in enumerate(keys)]
+            spec = sem.decider_spec(conds, [sem.out(out, constant=sem.i32(sum(1 << b for b in bs)))])
+            nodes.append(self.op("decider", spec, [a.node], [], f"{label} bit{bs[0]}"))
         return Scalar(Collect(nodes), out)
 
     def decider(self, conds, outs, else_outs=None, red=(), green=(), label=""):

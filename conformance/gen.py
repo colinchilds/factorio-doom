@@ -107,6 +107,34 @@ def decider_select(b):
 
 
 @case(ticks=6)
+def decider_ranges(b):
+    """Several Each conditions in one decider (range tests per lane: lo <= Each <= hi, OR'd), and
+    named conditions on chosen wires gating a named output copied from one wire."""
+    r, g = pair_inputs(b)
+    A, B, C = sig("signal-A"), sig("signal-B"), sig("signal-C")
+    rng = [cond(EACH, ">=", 1, RED), cond(EACH, "<=", 7, RED, compare_type="and"),
+           cond(EACH, ">=", 30, RED, compare_type="or"), cond(EACH, "<", 33, RED, compare_type="and"),
+           cond(EACH, "=", -8, RED, compare_type="or")]
+    combs = [
+        b.decider(0, 2, rng, [out(EACH, copy=False, constant=-(1 << 30))]),
+        b.decider(1, 2, rng, [out(EACH, networks=GREEN)], [out(EACH, copy=False, constant=5)]),
+        # (A(red) > 0 AND B(green) > 0 AND C(green) = 0) OR (A(red) < 0 AND B(green) < 0): copy B
+        b.decider(2, 2, [cond(A, ">", 0, RED), cond(B, ">", 0, GREEN, compare_type="and"),
+                         cond(C, "=", 0, GREEN, compare_type="and"),
+                         cond(A, "<", 0, RED, compare_type="or"), cond(B, "<", 0, GREEN, compare_type="and")],
+                  [out(B, networks=GREEN)]),
+        b.decider(3, 2, [cond(B, ">", 0, GREEN), cond(C, "!=", 0, GREEN, compare_type="and")],
+                  [out(B, networks=GREEN)]),
+        # Per lane: a constant plus a copy of the green wire, in both branches.
+        b.decider(4, 2, [cond(EACH, ">", 0, RED)],
+                  [out(EACH, copy=False, constant=1000), out(EACH, networks=GREEN)],
+                  [out(EACH, copy=False, constant=-50), out(EACH, networks=GREEN)]),
+        b.decider(5, 2, [cond(EACH, ">", 0, RED)], [out(EACH, copy=False, constant=9)], [out(EACH, networks=GREEN)]),
+    ]
+    wire_inputs(b, combs, r, g)
+
+
+@case(ticks=6)
 def decider_logic(b):
     """AND/OR precedence, everything/anything, outputs of everything, empty inputs."""
     inp = b.constant(0, 0, {"signal-A": 5, "signal-D": -4, "signal-E": 9})

@@ -2,15 +2,16 @@
 
 Everything runs as vectors whose lanes are screen columns (no per-column units):
 
-  scalars   clock -> view angle and path angle -> cos/sin (bit-sliced lookups) -> position,
-            direction, camera plane
-  rays      RDX, RDY per column = dir + plane * camX (camX is a constant vector)
+  scalars   view angle -> camera vectors (signed bit-sliced lookups) and position
+  rays      RAW = camx * plane + dir << 10 per column (a wire sum; camX is a constant vector),
+            RD = RAW >> 10, never 0 by the choice of the rounding term (ray_base)
   march     for vertical grid lines and for horizontal ones separately: K steps, each one network
-            of W lanes. Step k holds every column's k-th crossing: its distance D_k and the map
-            cell it enters (as a key 64*(x+1) + y). A lookup decider marks walls with -2^30, so a
-            running per-lane min over the steps (one decider each) keeps the nearest wall.
-            Distances are doubled and the horizontal march adds 1, so the min carries the side.
-  shade     wall height LH = H*2048 / DS, brightness 15*8192 / (DS + 8192) (+1), side tint
+            of W lanes, all computed at once from the step index k. Step k's distance D_k and the
+            map key of the cell entered (<< 12) are each one division by RD. A range-lookup
+            decider marks walls with -2^30, and a min tree per side keeps the nearest hit.
+  shade     the last min level is split by side (MV, MH); LH + 1 = (H*2048 + DS) / DS,
+            brightness 16*8192 / (DS + 8192) per side (0 on the other side's lanes), times the
+            side's base color: two products that just add up
   rows      one decider per screen row: LH > |2y+1-H| ? wall color : the row's floor/ceiling
 
 Lanes vanish when a value is 0, which would silently drop columns. Every vector that might hit 0
@@ -31,7 +32,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "conformance"))
 from bp import DEFAULT_SUBSTATION_QUALITY, Blueprint, encode, quality_arg  # noqa: E402
 from compiler import semantics as sem  # noqa: E402
-from compiler.netlist import EACH, GREEN, LANE_SIGNALS, RED, Graph  # noqa: E402
+from compiler.netlist import EACH, GREEN, LANE_SIGNALS, RED, Collect, Graph, Scalar  # noqa: E402
 
 MAP = """
 ################
@@ -83,15 +84,46 @@ def trig(fn):
 
 
 def camera_tables(offset=0):
-    """Per view angle a (0..255, plus offset): direction DX, DY (scale 1024), camera plane
-    PLX, PLY and the ray base DX10, DY10 ((D << 10) | 512)."""
+    """Per view angle a (0..255, plus offset): direction DX, DY (scale 1024) and camera plane
+    PLX, PLY."""
     t = {}
     for a in range(256):
         th = 2 * math.pi * ((a + offset) % 256) / 256
         dx, dy = round(1024 * math.cos(th)), round(1024 * math.sin(th))
-        t[a] = {"DX": dx, "DY": dy, "PLX": (dy * -PLANE) >> 10, "PLY": (dx * PLANE) >> 10,
-                "DX10": (dx << 10) | 512, "DY10": (dy << 10) | 512}
+        t[a] = {"DX": dx, "DY": dy, "PLX": (dy * -PLANE) >> 10, "PLY": (dx * PLANE) >> 10}
     return t
+
+
+def ray_base(tabs, camx, d, pl):
+    """Per angle: the ray base (D << 10) + e, with the rounding term e as close to 512 as possible
+    such that no column's component (camx * PL + (D << 10) + e) >> 10 is 0. A 0 lane would
+    vanish; this replaces forcing the components odd (an OR, one tick)."""
+    out = {}
+    for a, t in tabs.items():
+        vs = [cx * t[pl] + (t[d] << 10) for cx in camx]
+        for e in sorted(range(-1024, 2048), key=lambda e: (abs(e - 512), e)):
+            if all((v + e) >> 10 for v in vs):
+                out[a] = (t[d] << 10) + e
+                break
+        else:
+            raise ValueError(f"angle {a}: no rounding term keeps every {d} ray nonzero")
+    return out
+
+
+def key_ranges(keys, shift):
+    """Conditions: Each in [k << shift, (k + 1) << shift) for any k in keys (consecutive keys
+    merged into one range)."""
+    runs = []
+    for k in sorted(set(keys)):
+        if runs and runs[-1][1] == k - 1:
+            runs[-1][1] = k
+        else:
+            runs.append([k, k])
+    conds = []
+    for lo, hi in runs:
+        conds += [sem.cond(EACH, ">=", lo << shift, RED, "or" if conds else None),
+                  sem.cond(EACH, "<", (hi + 1) << shift, RED, "and")]
+    return conds
 
 
 def scripted_camera(g):
@@ -109,7 +141,7 @@ def scripted_camera(g):
 
 def build_graph(w, h, camera=scripted_camera, g=None):
     """camera(g) -> (A, PX, PY, extra scalars): view angle 0..255 and an odd position (1/FP
-    tiles) as scalars of g."""
+    tiles) as scalars of g. extra may hold "angle_offset", added to A by the tables."""
     g = g or Graph()
     cols = LANE_SIGNALS[:w]
     vec = lambda vals, label="vec": g.const([(cols[c], v) for c, v in enumerate(vals)], label)
@@ -117,84 +149,105 @@ def build_graph(w, h, camera=scripted_camera, g=None):
     camx = [(2 * c + 1 - w) * 1024 // w for c in range(w)]
     assert all(camx)
 
-    # -- scalars: the camera vectors come straight out of lookups keyed by the view angle,
-    # offset to be positive (bit-sliced lookups); the offsets come off in a constant on the wire.
+    # -- scalars: the camera vectors come straight out of signed lookups keyed by the view angle.
     A, PX, PY, extra = camera(g)
+    # The march wants the position one tick after the angle; a later position would leave every
+    # angle-derived vector waiting in delays, so delay the angle instead (shared).
+    lag = max(PX.node.time, PY.node.time) - 1 - A.node.time
+    if lag > 0:
+        A = Scalar(g.delay(A.node, lag), A.signal)
     tabs = camera_tables(extra.pop("angle_offset", 0))
-    OP, OD = 1024, 1 << 21
-    look = lambda name, off, bits: g.lookup_scalar(A, {a: tabs[a][name] + off for a in range(256)}, bits, name)  # noqa: E731
-    PLX, PLY = look("PLX", OP, 11), look("PLY", OP, 11)
-    DX10, DY10 = look("DX10", OD, 22), look("DY10", OD, 22)
+    look = lambda name, table: g.lookup_scalar(A, table, 32, name)  # noqa: E731
+    PLX = look("PLX", {a: tabs[a]["PLX"] for a in range(256)})
+    PLY = look("PLY", {a: tabs[a]["PLY"] for a in range(256)})
+    DX10 = look("DX10", ray_base(tabs, camx, "DX", "PLX"))
+    DY10 = look("DY10", ray_base(tabs, camx, "DY", "PLY"))
 
-    # -- ray directions per column (scale 1024), forced odd so never 0:
-    # (camx * PL + D10) >> 10, the sum done by joining wires
-    corr = [-(camx[c] * OP + OD) for c in range(w)]
-
+    # -- ray directions per column (scale 1024): RAW = camx * PL + D10 is a wire sum; its sign is
+    # the ray's, and RD = RAW >> 10 is never 0 (ray_base).
     def ray(PL, D10):
-        r = g.vc([g.vs(vec(camx, "camx"), "*", PL), g.broadcast(ones(), D10), vec(corr, "ray offset")], ">>", 10)
-        return g.vv(r, "OR", ones())
-    RDX, RDY = ray(PLX, DX10), ray(PLY, DY10)
+        raw = [g.vs(vec(camx, "camx"), "*", PL), g.broadcast(ones(), D10)]
+        return raw, g.vc(raw, ">>", 10, "ray")
+    (RAWX, RDX), (RAWY, RDY) = ray(PLX, DX10), ray(PLY, DY10)
 
-    def march(RD, RO, P, PO, side):
+    def march(RAW, RD, RO, P, PO, side):
         """Crossings of the grid lines perpendicular to this axis, all K at once. RD: ray component
-        along the axis, RO: the other one; P/PO: position along / across (scale FP).
+        along the axis (RAW: the same before >> 10, for its sign), RO: the other one; P/PO:
+        position along / across (scale FP, odd). FR = P & 255.
 
-        Crossing k: distance D_k = 2 * (T1 + k * DT) (+1 on side 1, so the min carries the side)
-        and map key ((Q + k * DQ) + J_k) >> 16, where Q/DQ is the across position in 2^16 per
-        tile and J_k = (64 * line_k + c) << 16 puts the line index into the key. Side 0 keys are
-        64 * (x + 1) + y, side 1 keys 64 * y + (x + 1) (its own wall table). Returns the K
-        (hit_k + D_k) leaves: a wall marks its lane with HIT, so the min is the nearest hit."""
-        FR = g.ss(P, "AND", FP - 1)
-        FI = g.ss(P, ">>", 8)
-        sel = lambda a, b=None: g.decider([sem.cond(EACH, ">", 0, RED)], [sem.out(EACH, constant=a)],  # noqa: E731
-                                          [sem.out(EACH, constant=b)] if b is not None else None, red=RD)
-        S = sel(1, -1)
-        AR = g.vv(RD, "*", S)
-        mFR = lambda m: g.broadcast(ones(), g.ss(FR, "*", -m))  # noqa: E731
-        T1 = g.vv([sel(FP * 4096), mFR(4096)], "/", RD)                       # (line - p) / RD, 2^10 per tile
-        DT = g.vv(vec([1 << 20] * w, "c20"), "/", AR)
-        Q = [g.vv(g.vv([sel(FP * 256), mFR(256)], "*", RO), "/", RD), g.broadcast(ones(), g.ss(PO, "<<", 8)),
-             g.broadcast(ones(), g.ss(FI, "<<", 22))]
-        Q.append(sel(128 << 16) if side == 0 else sel(65 << 16, -63 << 16))   # entering line FI+-1
-        DQ = [g.vv(g.vc(RO, "*", 65536), "/", AR), sel(1 << 22, -(1 << 22))]  # across step + line step
+        Crossing k is at signed distance along_k = sel(256 (k + 1), -256 k) - FR along the axis
+        (sel: first value where the ray goes +, second where -). From it, each one division:
+          D_k = along_k * 8192 / RD                   (2^11 per tile of ray length)
+          Q_k = along_k * 16 * RO / RD + 16 PO + (P >> 8 << 18) + line_k
+        Q_k is the map key of the cell entered, << 12: across position at 2^12 per tile, plus
+        line_k = the line index (side 0: 64 (x + 1), side 1: 64 y + 1 << 12). The hit lookup
+        tests key ranges, so no shift. Side 0 keys are 64 (x + 1) + y, side 1 64 y + (x + 1)
+        (its own wall table). Returns the K leaves (hit_k + D_k): a wall marks its lane with HIT,
+        so the min is the nearest hit."""
+        FR = g.ss(P, "AND", FP - 1, "fr")
+        Zs = g.new_scalar_signal()
+        zl = g.ss(g.ss(P, ">>", 8), "<<", 18, "line z", out=Zs)
+        za = g.ss(PO, "<<", 4, "across z", out=Zs)
+        Z = Scalar(Collect([zl.node, g.delay(za.node, zl.node.time - za.node.time)]), Zs)
+        ZB = g.broadcast(ones(), Z)
+
+        def sel(src, a, b, add, label):
+            """Per lane: (a if src > 0 else b) + add, where add is a vector shared by all steps (on
+            green, one network)."""
+            copy = [sem.out(EACH, networks=GREEN)]
+            return g.decider([sem.cond(EACH, ">", 0, RED)], [sem.out(EACH, constant=a)] + copy,
+                             ([sem.out(EACH, constant=b)] if b else []) + copy, red=src, green=add, label=label)
+        FR16 = g.vs(vec([-16] * w, "-16"), "*", FR, "-16 fr")
+        FR8k = g.vs(vec([-8192] * w, "-8192"), "*", FR, "-8192 fr")
+        RDd = g.delay(RD, 1)
+        Lp, Ln = (2 << 18, 0) if side == 0 else (65 << 12, -63 << 12)
         walls = wall_keys() if side == 0 else [64 * y + x + 1 for y, row in enumerate(MAP) for x, c in enumerate(row) if c == "#"]
-        hit_conds = [sem.cond(EACH, "=", k, RED, "or" if i else None) for i, k in enumerate(walls)]
-        keys = [g.vc(Q, ">>", 16, f"key{side}.0")]
-        keys += [g.vc(g.vv(Q, "+", g.vc(DQ, "*", k)), ">>", 16, f"key{side}.{k}") for k in range(1, K)]
-        hits = [g.decider(hit_conds, [sem.out(EACH, constant=HIT)], red=key, label=f"hit{side}.{k}")
-                for k, key in enumerate(keys)]
-        T2 = g.vc(T1, "*", 2)
-        DTd = g.delay(DT, max(0, hits[1].time - 2 - DT.time))
-        one = [ones()] if side else []
-        leaves = [[hits[0], T2] + one]
-        leaves += [[hits[k], g.vv(T2, "+", [g.vc(DTd, "*", 2 * k)] + one)] for k in range(1, K)]
+        hit_conds = key_ranges(walls, 12)
+        leaves = []
+        for k in range(K):
+            # FR16 is ready a tick after RAW, so it joins on the product's wire (one copy per step).
+            along = g.decider([sem.cond(EACH, ">", 0, RED)], [sem.out(EACH, constant=4096 * (k + 1))],
+                              [sem.out(EACH, constant=-4096 * k)] if k else None, red=RAW, label=f"along{side}.{k}")
+            Q = g.vv(g.vv(RO, "*", [along, FR16], f"across{side}.{k}"), "/", RD, f"q{side}.{k}")
+            L = sel(RDd, Lp + (k << 18), Ln - (k << 18), ZB, f"line{side}.{k}")
+            hit = g.decider(hit_conds, [sem.out(EACH, constant=HIT)], red=[Q, L], label=f"hit{side}.{k}")
+            D = g.vv(sel(RDd, (k + 1) << 21, -(k << 21), FR8k, f"dist{side}.{k}"), "/", RD, f"d{side}.{k}")
+            leaves.append([hit, D])
         return leaves
 
-    # Nearest hit over both axes: a min tree (lane-wise: copy red if smaller, else green).
-    level = march(RDX, RDY, PX, PY, 0) + march(RDY, RDX, PY, PX, 1)
-    depth = 0
-    while len(level) > 1:
-        nxt = [g.decider([sem.cond(EACH, "<", EACH, RED, None, GREEN)], [sem.out(EACH, networks=RED)],
-                         [sem.out(EACH, networks=GREEN)], red=a, green=b, label=f"min{depth}.{i}")
-               for i, (a, b) in enumerate(zip(level[::2], level[1::2]))]
-        level = nxt + level[len(level) - len(level) % 2:]
-        depth += 1
-    M = level[0]
-    # DS = M + 2^30 is never formed: the constant rides on each consumer's wire.
-    LHB = g.vv(g.vv(vec([h << 11] * w, "h"), "/", [M, vec([1 << 30] * w, "2^30")]), "+", ones(), "LH+1")
-    BR = g.vv(vec([15 * FOG] * w, "fog"), "/", [M, vec([(1 << 30) + FOG] * w, "2^30+fog")], "brightness")
-    BASE = g.vc(g.vc(M, "AND", 1), "*", pack(BASE_H) - pack(BASE_V))
-    COLOR = g.vv([BR, ones()], "*", [BASE, vec([pack(BASE_V)] * w, "base")], "color")
+    # Nearest hit per side: a min tree (lane-wise: copy red if smaller, else green).
+    def tree(level, side):
+        depth = 0
+        while len(level) > 1:
+            nxt = [g.decider([sem.cond(EACH, "<", EACH, RED, None, GREEN)], [sem.out(EACH, networks=RED)],
+                             [sem.out(EACH, networks=GREEN)], red=a, green=b, label=f"min{side}.{depth}.{i}")
+                   for i, (a, b) in enumerate(zip(level[::2], level[1::2]))]
+            level = nxt + level[len(level) - len(level) % 2:]
+            depth += 1
+        return level[0]
+    M0 = tree(march(RAWX, RDX, RDY, PX, PY, 0), 0)
+    M1 = tree(march(RAWY, RDY, RDX, PY, PX, 1), 1)
+    # The last level is split by side: MV holds the lanes where a vertical line is nearer, MH the
+    # rest (ties). Each side then has a constant base color, so no side select is needed.
+    MV = g.decider([sem.cond(EACH, "<", EACH, RED, None, GREEN)], [sem.out(EACH, networks=RED)],
+                   red=M0, green=M1, label="nearest V")
+    MH = g.decider([sem.cond(EACH, ">=", EACH, RED, None, GREEN)], [sem.out(EACH, networks=GREEN)],
+                   red=M0, green=M1, label="nearest H")
+    # DS = M + 2^30 (the distance) is never formed: the constant rides on each consumer's wire.
+    # LH + 1 = (H*2048 + DS) / DS. A side's brightness 16*FOG / (DS + FOG) is 0 on the other
+    # side's lanes (DS = 2^30 there), and >= 1 within the march (DS < 15 * FOG).
+    LH1 = g.vv([vec([(h << 11) + (1 << 30)] * w, "h+2^30"), MV, MH], "/", [MV, MH, vec([1 << 30] * w, "2^30")], "LH+1")
+    br = lambda M, label: g.vv(vec([16 * FOG] * w, "fog"), "/", [M, vec([(1 << 30) + FOG] * w, "2^30+fog")], label)  # noqa: E731
+    COLOR = [g.vc(br(MV, "brightness V"), "*", pack(BASE_V), "color V"),
+             g.vc(br(MH, "brightness H"), "*", pack(BASE_H), "color H")]
 
     rows = []
     for y in range(h):
         n = g.decider([sem.cond(EACH, ">", abs(2 * y + 1 - h) + 1, GREEN)], [sem.out(EACH, networks=RED)],
-                      [sem.out(EACH, constant=pack(background(y, h)))], red=COLOR, green=LHB, label=f"row{y}")
+                      [sem.out(EACH, constant=pack(background(y, h)))], red=COLOR, green=LH1, label=f"row{y}")
         n.fixed, n.pos = True, (-2, y)
         rows.append(n)
     return g, cols, rows, {**extra, "A": A, "PX": PX, "PY": PY, "tables": tabs}
-
-
 
 
 def build(w, h, substation_quality=DEFAULT_SUBSTATION_QUALITY):
@@ -264,9 +317,9 @@ def ideal(g, scal, w, h, T):
                 d, side, ty, my = ty, 1, ty + ddy, my + sy
             if MAP[my][mx] == "#":
                 break
-        ds = 2 * d * 1024 + side
+        ds = 2 * d * 1024
         lh = int(h * 2048 / ds)
-        br = int(15 * FOG / (ds + FOG)) + 1
+        br = int(16 * FOG / (ds + FOG))
         color = br * pack(BASE_H if side else BASE_V)
         for y in range(h):
             if lh > abs(2 * y + 1 - h):
