@@ -29,7 +29,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "conformance"))
-from bp import Blueprint, encode  # noqa: E402
+from bp import DEFAULT_SUBSTATION_QUALITY, Blueprint, encode, quality_arg  # noqa: E402
 from compiler import semantics as sem  # noqa: E402
 from compiler.netlist import EACH, GREEN, LANE_SIGNALS, RED, Graph  # noqa: E402
 
@@ -175,15 +175,14 @@ def build_graph(w, h):
     return g, cols, rows, {"T": T, "PX": PX, "PY": PY, "DX": DX, "DY": DY, "PLX": PLX, "PLY": PLY}
 
 
-def lattice(x, y):
-    return (x - 8) % 18 in (0, 1) and (y - 8) % 18 in (0, 1)
 
 
-def build(w, h):
+def build(w, h, substation_quality=DEFAULT_SUBSTATION_QUALITY):
     if w > len(LANE_SIGNALS):
         raise SystemExit(f"width {w} needs {w} lane signals, only {len(LANE_SIGNALS)}")
     g, cols, rows, scal = build_graph(w, h)
-    b = Blueprint(f"Raycaster M1 {w}x{h}")
+    b = Blueprint(f"Raycaster M1 {w}x{h}", substation_quality)
+    lattice = b.grid.hole
     ent = g.compile(b, blocked=lattice, region=lambda x, y: x <= -3)
     for y, n in enumerate(rows):
         lamps = [b.lamp(x, y, {"use_colors": True, "color_mode": 2, "rgb_signal": cols[x]}, always_on=True)
@@ -198,15 +197,17 @@ def build(w, h):
 
 
 def _substations(b):
-    """Substations on the 18-tile lattice wherever they power something."""
+    """Substations on the lattice (see SubstationGrid) wherever they power something."""
+    grid = b.grid
     tiles = b.occupied()
     xs = [x for x, _ in tiles]
     ys = [y for _, y in tiles]
-    for sx in range(min(xs) - 18, max(xs) + 19):
-        for sy in range(min(ys) - 18, max(ys) + 19):
-            if (sx - 8) % 18 or (sy - 8) % 18:
+    for sx in range(min(xs) - grid.period, max(xs) + grid.period + 1):
+        for sy in range(min(ys) - grid.period, max(ys) + grid.period + 1):
+            if (sx - grid.offset) % grid.period or (sy - grid.offset) % grid.period:
                 continue
-            if any((x, y) in tiles for x in range(sx - 8, sx + 10) for y in range(sy - 8, sy + 10)):
+            area = range(-grid.d + 1, grid.d + 1)
+            if any((sx + dx, sy + dy) in tiles for dx in area for dy in area):
                 if not {(sx, sy), (sx + 1, sy), (sx, sy + 1), (sx + 1, sy + 1)} & tiles:
                     b.substation(sx, sy)
 
@@ -261,7 +262,7 @@ def read_ppm(path):
              for x in range(w)] for y in range(h)]
 
 
-def verify(path, g, cols, rows, scal, w, h, ticks):
+def verify(path, g, cols, rows, scal, w, h, ticks, lattice):
     out_dir = ROOT / "out" / f"raycast_{w}x{h}_ppm"
     out_dir.mkdir(parents=True, exist_ok=True)
     for f in out_dir.glob("*.ppm"):
@@ -308,9 +309,10 @@ def main():
     ap.add_argument("--size", default="160x100")
     ap.add_argument("--ticks", type=int, default=400)
     ap.add_argument("--verify", action="store_true")
+    quality_arg(ap)
     a = ap.parse_args()
     w, h = map(int, a.size.lower().split("x"))
-    g, b, cols, rows, scal = build(w, h)
+    g, b, cols, rows, scal = build(w, h, a.substation_quality)
     data = b.to_json()
     data["fsim"] = {"ticks": a.ticks, "doc": f"raycaster M1 {w}x{h}"}
     gen = HERE / "gen"
@@ -321,7 +323,7 @@ def main():
     n_comb = sum(1 for e in b.entities if "combinator" in e["name"] and e["name"] != "constant-combinator")
     n_lamp = sum(1 for e in b.entities if e["name"] == "small-lamp")
     print(f"{path.relative_to(ROOT)}: {len(b.entities)} entities ({n_comb} combinators, {n_lamp} lamps, {g.relays} relay poles)")
-    if a.verify and not verify(path, g, cols, rows, scal, w, h, a.ticks):
+    if a.verify and not verify(path, g, cols, rows, scal, w, h, a.ticks, b.grid.hole):
         sys.exit(1)
 
 

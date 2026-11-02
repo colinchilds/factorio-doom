@@ -28,7 +28,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(ROOT / "conformance"))
 from bp import (EACH, EVERYTHING, GREEN, GREEN_IN, GREEN_OUT, RED, RED_IN, RED_OUT, LETTERS,  # noqa: E402
-                Blueprint, cond, encode, out, sig)
+                DEFAULT_SUBSTATION_QUALITY, Blueprint, cond, encode, out, quality_arg, sig)
 
 # Signals that exist, unhidden, in both vanilla and Space Age (harness/run.py --lanes). Virtual
 # signals aren't in the list, so the named scalars (letters) can't collide with a lane.
@@ -212,13 +212,13 @@ def reference(T, w, h, sw, sh, words, nw, colors):
 # ---------------------------------------------------------------------------------------------
 # Blueprint
 
-def build(w, h, prefix):
+def build(w, h, prefix, substation_quality=DEFAULT_SUBSTATION_QUALITY):
     names, sw, sh, colors, texels = load_sprite(prefix)
     nw, words = strip_words(texels, sw, sh)
     if w + h > len(LANE_SIGNALS):
         raise SystemExit(f"{w}x{h} needs {w + h} lane signals, only {len(LANE_SIGNALS)} available")
     cols, rows = LANE_SIGNALS[:w], LANE_SIGNALS[w:w + h]
-    b = Blueprint(f"Sprite demo {w}x{h} ({prefix}, Freedoom)")
+    b = Blueprint(f"Sprite demo {w}x{h} ({prefix}, Freedoom)", substation_quality)
     A = lambda tx, ty, *args, **kw: b.arithmetic(tx, ty, *args, direction=4, **kw)
     D = lambda tx, ty, *args, **kw: b.decider(tx, ty, *args, direction=4, **kw)
 
@@ -314,10 +314,9 @@ def build(w, h, prefix):
     # --- Screen rows.
     ones = b.constant(slot(PAL + 15), -1, [(c, ONES) for c in cols])
     holes = set()
-    for sy in sorted({min(8 + 18 * j, h - 2) for j in range((h + 17) // 18)}):
-        for sxx in sorted({min(8 + 18 * i, w - 2) for i in range((w + 17) // 18)}):
-            b.substation(sxx, sy)
-            holes |= {(sxx, sy), (sxx + 1, sy), (sxx, sy + 1), (sxx + 1, sy + 1)}
+    for sxx, sy in b.grid.screen(w, h):
+        b.substation(sxx, sy)
+        holes |= {(sxx, sy), (sxx + 1, sy), (sxx, sy + 1), (sxx + 1, sy + 1)}
     above = None
     for y, rs in enumerate(rows):
         mux = [D(slot(MUX + j), y, [cond(rs, "=", ROW_BASE + j, RED)], [out(EVERYTHING, networks=GREEN)])
@@ -414,9 +413,10 @@ def main():
     ap.add_argument("--sprite", default="TROO")
     ap.add_argument("--ticks", type=int, default=PERIOD + 60)
     ap.add_argument("--verify", action="store_true")
+    quality_arg(ap)
     a = ap.parse_args()
     w, h = map(int, a.size.lower().split("x"))
-    b, meta, words = build(w, h, a.sprite)
+    b, meta, words = build(w, h, a.sprite, a.substation_quality)
     data = b.to_json()
     data["fsim"] = {"ticks": a.ticks, "doc": f"sprite demo {w}x{h}"}
     gen = HERE / "gen"

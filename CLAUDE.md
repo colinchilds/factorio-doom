@@ -153,8 +153,15 @@ Earlier notes that still hold:
   - It's pipelined, so a new frame can start every tick, with latency around 25 ticks.
 - **UPS is not the blocker (M0, measured).** A full 320×200 pixel stage with 63k lamps costs
   about 1 ms per tick, against a 16.7 ms budget. See "M0 results" below.
-- **Power means dead pixels.** Substations have to sit inside the lamp screen: 2×2 holes on an
-  18-tile grid, about 1.3% of pixels, the same as giftorio. Plan the HUD and the layout around
+- **Power means dead pixels.** Substations have to sit inside the lamp screen, as 2×2 holes on
+  a grid. **Substation quality is a build parameter (`--substation-quality`, default
+  `legendary`, user request 2026-11-01).**
+  - Legendary substations power 28×28 and reach 28, so the holes cost about 0.5% of pixels.
+  - Normal substations (18×18, as in giftorio) cost about 1.2%.
+  - Values come from `conformance/pole_quality.json` (`harness/run.py --poles`); `bp.SubstationGrid`
+    derives the lattice from them.
+
+  Plan the HUD and the layout around
   them.
 
 ### M0 results (2026-11-01, Factorio 2.1.23, the user's Mac: arm64, 16 cores)
@@ -220,8 +227,10 @@ The game is the referee, and fsim is the fast development loop:
 3. **Conformance** (`conformance/`):
    - `bp.py` is a stdlib-only blueprint builder. `power()` places substations until every
      entity tile is covered, counting substations already placed. A solid lamp screen needs
-     its own substation grid placed first (see `bench/m0.py`), and solid combinator blocks need
-     a gap column for substations every 18 tiles or so.
+     its own substation grid placed first (`b.grid.screen(w, h)`, or the `b.grid.hole` lattice),
+     and solid combinator blocks need a gap column for substations every 18 tiles or so.
+   - `Blueprint(label, substation_quality)` defaults to `normal` so the conformance cases stay
+     vanilla. The generators for players (`demos/*.py`) default to legendary.
    - `gen.py` defines the cases. Each packs many edge values into separate lanes.
    - Golden game recordings: `conformance/game_dump.json`, and
      `demos/golden/gradient_dump.json` for the demo. `cargo test` checks fsim against both.
@@ -326,6 +335,14 @@ Commit only when the user asks.
   harness then adds a single power source, so a missing link shows up as unpowered entities.
   Before handing a blueprint over, run `harness/run.py --dlc --bench 30 file.json`: it builds it
   in a Space Age game and fails on import errors or unpowered entities.
+- **Substation quality:** player blueprints use legendary substations by default. Above-normal
+  quality only exists with the quality mod, so:
+  - Check them with `harness/run.py --dlc`.
+  - Game comparisons without the DLC (`harness/run.py` then `fsim conform`) need
+    `--substation-quality normal` when generating.
+
+  fsim ignores entity quality (its pole reach is normal-quality). That's harmless while
+  substations carry no circuit wires.
 - **Screen lamps need `always_on`** (`b.lamp(..., always_on=True)`), or they stay dark in
   daylight. The harness runs at night, so it can't catch this.
 - Python is stdlib only. Game paths come from `FACTORIO` and the Steam default in

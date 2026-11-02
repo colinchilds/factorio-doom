@@ -54,6 +54,9 @@ python3 harness/run.py --bench 300 bench/gen/*_160x100.json -o bench/m0_160x100.
 # Raycaster M1: generate, check every frame against the netlist evaluation
 python3 demos/raycast.py --size 160x100 --verify   # -> demos/gen/raycast_160x100.{json,txt}
 python3 harness/run.py --warmup 60 out/dir -o dump.json   # deep pipelines: settle before t0
+# Substations default to legendary (28x28 supply, fewer dead pixels). Game checks without the
+# DLC need normal ones; with the DLC: harness/run.py --dlc --bench 30 demos/gen/raycast_160x100.json
+python3 demos/raycast.py --size 64x40 --substation-quality normal
 
 # Sprite demo: generate, check every frame against the reference, preview as a GIF
 python3 demos/sprite.py --size 160x100 --verify    # -> demos/gen/sprite_160x100.{json,txt}
@@ -63,6 +66,7 @@ python3 tools/wad.py freedoom2.wad --list TROO     # sprites in a WAD (see asset
 
 python3 harness/run.py --dlc --bench 30 demos/gen/sprite_160x100.json   # imports in Space Age?
 python3 harness/run.py --lanes                    # refresh conformance/lane_signals.json
+python3 harness/run.py --poles                    # refresh conformance/pole_quality.json (DLC)
 python3 harness/run.py --signals                  # refresh conformance/signal_order.json
 python3 harness/run.py --discover                 # export a blueprint with every option set
 ```
@@ -87,7 +91,7 @@ Each of these was measured in the game and is checked by a conformance case.
 | Selector | Ties keep the game's internal signal order when selecting the max; the min list is the max list reversed. `index_comparator` supports `<`, `<=` and so on (N-highest / N-lowest). The index can come from a signal on either wire; a negative index gives nothing. Count and time modes are also covered. |
 | Signal order | The game's internal order (items, fluids, virtual, recipes, entities, …), saved in `conformance/signal_order.json`. Vanilla has **2,878 signal lanes** (1,439 signals × normal / quality-unknown). |
 | Lamps | Packed RGB = `(v>>16)&255, (v>>8)&255, v&255`. Components are clamped to 0–255. Color mapping uses the first positive color signal in prototype order; with none, the lamp shows its default color. A lamp with no wires ignores its circuit settings. |
-| Wire reach | A wire connects when the straight-line **gap between the two tile footprints** is ≤ the *shorter* reach of its two ends; **between two poles it's the distance between their centers** instead. Combinators, lamps and constants reach 9, small poles 7.5, medium 9, big 32, substations 18. Longer wires are silently dropped when a blueprint is built; fsim warns about them. |
+| Wire reach | A wire connects when the straight-line **gap between the two tile footprints** is ≤ the *shorter* reach of its two ends; **between two poles it's the distance between their centers** instead. Combinators, lamps and constants reach 9, small poles 7.5, medium 9, big 32, substations 18. Longer wires are silently dropped when a blueprint is built; fsim warns about them. Quality raises reach and supply area (`conformance/pole_quality.json`): a legendary substation supplies 28×28 and reaches 28, a legendary medium pole reaches 19. |
 | Per-entity wire selection (2.1.7) | `input_networks` / `output_networks` don't exist for combinators (they always choose wires per signal); only lamps and similar entities have them. |
 
 ## Not simulated yet

@@ -1,0 +1,130 @@
+{
+ "big-electric-pole": {
+  "epic": {
+   "level": 3,
+   "max_circuit_wire_distance": 38,
+   "max_wire_distance": 38,
+   "supply_area_distance": 5
+  },
+  "legendary": {
+   "level": 5,
+   "max_circuit_wire_distance": 42,
+   "max_wire_distance": 42,
+   "supply_area_distance": 7
+  },
+  "normal": {
+   "level": 0,
+   "max_circuit_wire_distance": 32,
+   "max_wire_distance": 32,
+   "supply_area_distance": 2
+  },
+  "rare": {
+   "level": 2,
+   "max_circuit_wire_distance": 36,
+   "max_wire_distance": 36,
+   "supply_area_distance": 4
+  },
+  "uncommon": {
+   "level": 1,
+   "max_circuit_wire_distance": 34,
+   "max_wire_distance": 34,
+   "supply_area_distance": 3
+  }
+ },
+ "medium-electric-pole": {
+  "epic": {
+   "level": 3,
+   "max_circuit_wire_distance": 15,
+   "max_wire_distance": 15,
+   "supply_area_distance": 6.5
+  },
+  "legendary": {
+   "level": 5,
+   "max_circuit_wire_distance": 19,
+   "max_wire_distance": 19,
+   "supply_area_distance": 8.5
+  },
+  "normal": {
+   "level": 0,
+   "max_circuit_wire_distance": 9,
+   "max_wire_distance": 9,
+   "supply_area_distance": 3.5
+  },
+  "rare": {
+   "level": 2,
+   "max_circuit_wire_distance": 13,
+   "max_wire_distance": 13,
+   "supply_area_distance": 5.5
+  },
+  "uncommon": {
+   "level": 1,
+   "max_circuit_wire_distance": 11,
+   "max_wire_distance": 11,
+   "supply_area_distance": 4.5
+  }
+ },
+ "small-electric-pole": {
+  "epic": {
+   "level": 3,
+   "max_circuit_wire_distance": 13.5,
+   "max_wire_distance": 13.5,
+   "supply_area_distance": 5.5
+  },
+  "legendary": {
+   "level": 5,
+   "max_circuit_wire_distance": 17.5,
+   "max_wire_distance": 17.5,
+   "supply_area_distance": 7.5
+  },
+  "normal": {
+   "level": 0,
+   "max_circuit_wire_distance": 7.5,
+   "max_wire_distance": 7.5,
+   "supply_area_distance": 2.5
+  },
+  "rare": {
+   "level": 2,
+   "max_circuit_wire_distance": 11.5,
+   "max_wire_distance": 11.5,
+   "supply_area_distance": 4.5
+  },
+  "uncommon": {
+   "level": 1,
+   "max_circuit_wire_distance": 9.5,
+   "max_wire_distance": 9.5,
+   "supply_area_distance": 3.5
+  }
+ },
+ "substation": {
+  "epic": {
+   "level": 3,
+   "max_circuit_wire_distance": 24,
+   "max_wire_distance": 24,
+   "supply_area_distance": 12
+  },
+  "legendary": {
+   "level": 5,
+   "max_circuit_wire_distance": 28,
+   "max_wire_distance": 28,
+   "supply_area_distance": 14
+  },
+  "normal": {
+   "level": 0,
+   "max_circuit_wire_distance": 18,
+   "max_wire_distance": 18,
+   "supply_area_distance": 9
+  },
+  "rare": {
+   "level": 2,
+   "max_circuit_wire_distance": 22,
+   "max_wire_distance": 22,
+   "supply_area_distance": 11
+  },
+  "uncommon": {
+   "level": 1,
+   "max_circuit_wire_distance": 20,
+   "max_wire_distance": 20,
+   "supply_area_distance": 10
+  }
+ }
+}

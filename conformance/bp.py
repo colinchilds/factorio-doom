@@ -6,10 +6,59 @@ combinators), 3/4 = red/green combinator output, 5 = copper.
 
 import base64
 import json
+import pathlib
 import zlib
 
 RED_IN, GREEN_IN, RED_OUT, GREEN_OUT, COPPER = 1, 2, 3, 4, 5
 INT_MAX, INT_MIN = 2**31 - 1, -(2**31)
+
+# Supply area and wire reach of each pole at every quality, measured in a Space Age game
+# (harness/run.py --poles). Quality above normal needs the quality mod (Space Age).
+POLES = json.loads((pathlib.Path(__file__).resolve().parent / "pole_quality.json").read_text())
+QUALITIES = sorted(POLES["substation"], key=lambda q: POLES["substation"][q]["level"])
+# Generated blueprints for players use legendary substations: a 28x28 supply area instead of
+# 18x18, so the lamp screen loses 0.5% of its pixels to substations instead of 1.2%. Game checks
+# without the DLC (conformance, golden dumps) must pass "normal".
+DEFAULT_SUBSTATION_QUALITY = "legendary"
+
+
+class SubstationGrid:
+    """Substation layout for one quality. The supply area of a substation whose top-left tile is
+    (x, y) covers tiles x - (d - 1) .. x + d (d = supply area distance; 2d tiles square), so a
+    lattice with period 2d and offset d - 1 covers the plane with no overlap, starting at tile 0."""
+
+    def __init__(self, quality="normal"):
+        if quality not in POLES["substation"]:
+            raise ValueError(f"unknown quality {quality!r}; one of {', '.join(QUALITIES)}")
+        p = POLES["substation"][quality]
+        self.quality = quality
+        self.d = int(p["supply_area_distance"])
+        assert self.d == p["supply_area_distance"], "substation supply area is a whole number of tiles"
+        self.period, self.offset = 2 * self.d, self.d - 1
+        self.reach = p["max_wire_distance"]
+
+    def covers(self, sx, sy, x, y):
+        """Whether the substation with top-left tile (sx, sy) powers tile (x, y)."""
+        return sx - self.d < x <= sx + self.d and sy - self.d < y <= sy + self.d
+
+    def hole(self, x, y):
+        """Whether tile (x, y) is under a substation on the infinite lattice."""
+        return (x - self.offset) % self.period in (0, 1) and (y - self.offset) % self.period in (0, 1)
+
+    def screen(self, w, h):
+        """Top-left tiles of substations inside a w x h screen at (0, 0): the lattice, with the last
+        row and column pulled in so they stay inside the screen."""
+        xs = sorted({min(self.offset + self.period * i, w - 2) for i in range((w + self.period - 1) // self.period)})
+        ys = sorted({min(self.offset + self.period * j, h - 2) for j in range((h + self.period - 1) // self.period)})
+        return [(x, y) for y in ys for x in xs]
+
+
+def quality_arg(ap):
+    """Add --substation-quality to an argparse parser."""
+    ap.add_argument("--substation-quality", default=DEFAULT_SUBSTATION_QUALITY, choices=QUALITIES,
+                    help=f"quality of the substations (default {DEFAULT_SUBSTATION_QUALITY}; normal for "
+                         "game checks without the DLC)")
+
 
 LETTERS = [f"signal-{c}" for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"] + [f"signal-{d}" for d in range(10)]
 
@@ -33,8 +82,9 @@ RED, GREEN = nets(True, False), nets(False, True)
 
 
 class Blueprint:
-    def __init__(self, label):
+    def __init__(self, label, substation_quality="normal"):
         self.label = label
+        self.grid = SubstationGrid(substation_quality)
         self.entities = []
         self.wires = []
 
@@ -103,7 +153,9 @@ class Blueprint:
         return self._add("medium-electric-pole", tx + 0.5, ty + 0.5)
 
     def substation(self, tx, ty):
-        return self._add("substation", tx + 1, ty + 1)
+        """A substation of the blueprint's substation quality, top-left tile (tx, ty)."""
+        q = self.grid.quality
+        return self._add("substation", tx + 1, ty + 1, **({"quality": q} if q != "normal" else {}))
 
     def wire(self, a, ca, b, cb):
         self.wires.append([a, ca, b, cb])
@@ -127,19 +179,23 @@ class Blueprint:
         return tiles
 
     def power(self):
-        """Substations until every entity tile is inside some substation's 18x18 supply area.
+        """Substations until every entity tile is inside some substation's supply area (18x18 at
+        normal quality, 28x28 at legendary; see SubstationGrid).
 
         Greedy: take the first uncovered tile, put a substation at the free spot nearest to it,
-        repeat. The harness powers each substation on its own, so no copper links are needed.
+        repeat. Call link_power() afterwards so the substations form one network.
         """
+        grid = self.grid
         occ = self.occupied()
         targets = set(occ)
         for e in self.entities:  # substations already placed (e.g. a grid inside a lamp screen)
             if e["name"] == "substation":
                 x, y = int(e["position"]["x"]) - 1, int(e["position"]["y"]) - 1
-                targets = {(a, b) for a, b in targets if not (x - 8 <= a <= x + 9 and y - 8 <= b <= y + 9)}
+                g = SubstationGrid(e.get("quality", "normal"))
+                targets = {(a, b) for a, b in targets if not g.covers(x, y, a, b)}
         free = lambda x, y: not {(x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1)} & occ
-        spiral = sorted(((dx, dy) for dx in range(-8, 9) for dy in range(-8, 9)), key=lambda d: abs(d[0]) + abs(d[1]))
+        r = range(-(grid.d - 1), grid.d)
+        spiral = sorted(((dx, dy) for dx in r for dy in r), key=lambda d: abs(d[0]) + abs(d[1]))
         while targets:
             tx, ty = min(targets, key=lambda t: (t[1], t[0]))
             for dx, dy in spiral:
@@ -150,10 +206,14 @@ class Blueprint:
                 raise ValueError(f"no room for a substation within reach of tile {tx},{ty}")
             self.substation(x, y)
             occ |= {(x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1)}
-            # Supply area: 18x18 centered on (x + 1, y + 1), i.e. tiles x-8 .. x+9.
-            targets = {(a, b) for a, b in targets if not (x - 8 <= a <= x + 9 and y - 8 <= b <= y + 9)}
+            targets = {(a, b) for a, b in targets if not grid.covers(x, y, a, b)}
 
-    REACH = {"medium-electric-pole": 9, "small-electric-pole": 7.5, "big-electric-pole": 32, "substation": 18}
+    @staticmethod
+    def reach(e):
+        """Circuit wire reach of an entity (9 for anything that isn't a pole), by its quality."""
+        if e["name"] in POLES:
+            return POLES[e["name"]][e.get("quality", "normal")]["max_circuit_wire_distance"]
+        return 9
 
     def check_reach(self):
         """Raise if any circuit wire is longer than the game allows (it silently drops those):
@@ -165,7 +225,7 @@ class Blueprint:
             if e.get("direction", 0) in (4, 12):
                 w, h = h, w
             x0, y0 = e["position"]["x"] - w / 2, e["position"]["y"] - h / 2
-            rects[e["entity_number"]] = (x0, y0, x0 + w, y0 + h, self.REACH.get(e["name"], 9))
+            rects[e["entity_number"]] = (x0, y0, x0 + w, y0 + h, self.reach(e))
         for a, ca, c, cc in self.wires:
             if ca == COPPER:
                 continue
@@ -180,15 +240,18 @@ class Blueprint:
                 raise ValueError(f"wire #{a} -> #{c} is {(gx * gx + gy * gy) ** 0.5:.2f} tiles, over reach")
 
     def is_pole(self, n):
-        return self.entities[n - 1]["name"] in self.REACH
+        return self.entities[n - 1]["name"] in POLES
 
-    def link_power(self, reach=18):
+    def link_power(self):
         """Copper-wire the substations into one electric network (a minimum spanning tree over
-        center distances). Blueprints only carry the wires they list, so without this every
-        substation is its own island when the user pastes the blueprint."""
+        center distances; reach is the shorter copper reach of the two ends). Blueprints only
+        carry the wires they list, so without this every substation is its own island when the
+        user pastes the blueprint."""
         subs = [e for e in self.entities if e["name"] == "substation"]
         if not subs:
             return
+        cu = {q: v["max_wire_distance"] for q, v in POLES["substation"].items()}
+        reach = min(cu[e.get("quality", "normal")] for e in subs)
         pos = lambda e: (e["position"]["x"], e["position"]["y"])
         d2 = lambda a, b: (pos(a)[0] - pos(b)[0]) ** 2 + (pos(a)[1] - pos(b)[1]) ** 2
         best = {id(e): (d2(subs[0], e), subs[0]) for e in subs[1:]}

@@ -7,6 +7,7 @@
   python3 harness/run.py --bench 300 a.json b.json     # UPS: median ms/tick per blueprint
   python3 harness/run.py --dlc --bench 30 a.json       # same, in a Space Age game (import check)
   python3 harness/run.py --lanes                       # signals safe to use as lanes, with/without DLC
+  python3 harness/run.py --poles                       # pole supply area and reach per quality (DLC)
 
 Uses an isolated config and mod directory under harness/, so the user's saves and mods are
 never touched. Set FACTORIO to override the binary path.
@@ -103,6 +104,24 @@ def lanes(binary):
     print(f"{len(out)} lane signals -> {dest}; dropped {len(dropped)}: {' '.join(dropped[:60])} ...")
 
 
+def poles(binary):
+    """Supply area and wire reach of each electric pole at every quality, from the prototypes of a
+    Space Age game (quality levels above normal need the quality mod)."""
+    with dlc_mods(True):
+        write_cases([], 0, mode="poles")
+        shutil.rmtree(OUTPUT, ignore_errors=True)
+        save = DATA / "fsim-poles.zip"
+        factorio(binary, "--create", str(save))
+        factorio(binary, "--benchmark", str(save), "--benchmark-ticks", "3")
+    data = json.loads((OUTPUT / "poles.json").read_text())
+    dest = ROOT / "conformance" / "pole_quality.json"
+    dest.write_text(json.dumps(data, indent=1, sort_keys=True) + "\n")
+    for pole, qs in data.items():
+        print(pole, {q: (v["supply_area_distance"], v["max_wire_distance"], v["max_circuit_wire_distance"])
+                     for q, v in sorted(qs.items(), key=lambda kv: kv[1]["level"])})
+    print(f"-> {dest}")
+
+
 def load_cases(paths):
     files = []
     for p in map(pathlib.Path, paths):
@@ -166,6 +185,8 @@ def main():
                     help="run with Space Age, quality and elevated rails enabled (fsim models vanilla only)")
     ap.add_argument("--lanes", action="store_true",
                     help="write conformance/lane_signals.json: signals usable in vanilla and in Space Age")
+    ap.add_argument("--poles", action="store_true",
+                    help="write conformance/pole_quality.json: pole supply area and reach per quality")
     ap.add_argument("--bench", type=int, metavar="TICKS", help="time each blueprint alone for TICKS ticks")
     args = ap.parse_args()
     binary = pathlib.Path(os.environ.get("FACTORIO", DEFAULT_BIN))
@@ -184,6 +205,8 @@ def run(args, binary, ap):
 
     if args.lanes:
         return lanes(binary)
+    if args.poles:
+        return poles(binary)
 
     if args.discover or args.signals:
         write_cases([], 0, mode="discover" if args.discover else "signals")
