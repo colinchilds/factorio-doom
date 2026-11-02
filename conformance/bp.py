@@ -152,6 +152,14 @@ class Blueprint:
     def pole(self, tx, ty):
         return self._add("medium-electric-pole", tx + 0.5, ty + 0.5)
 
+    def chest(self, tx, ty, kind="steel-chest"):
+        """A container. Its contents are on any circuit wire attached to connector 1 (red) or 2."""
+        return self._add(kind, tx + 0.5, ty + 0.5)
+
+    def display(self, tx, ty, icon, always_show=True):
+        """A display panel showing a virtual signal's icon (no circuit behavior, no power)."""
+        return self._add("display-panel", tx + 0.5, ty + 0.5, icon=sig(icon), always_show=always_show)
+
     def substation(self, tx, ty):
         """A substation of the blueprint's substation quality, top-left tile (tx, ty)."""
         q = self.grid.quality
@@ -178,6 +186,13 @@ class Blueprint:
             tiles |= {(x0 + i, y0 + j) for i in range(w) for j in range(h)}
         return tiles
 
+    UNPOWERED = ("wooden-chest", "iron-chest", "steel-chest", "display-panel")
+
+    def unpowered_tiles(self):
+        """Tiles of entities that need no electricity (containers, display panels)."""
+        return {(int(e["position"]["x"]), int(e["position"]["y"])) for e in self.entities
+                if e["name"] in self.UNPOWERED}
+
     def power(self):
         """Substations until every entity tile is inside some substation's supply area (18x18 at
         normal quality, 28x28 at legendary; see SubstationGrid).
@@ -187,7 +202,7 @@ class Blueprint:
         """
         grid = self.grid
         occ = self.occupied()
-        targets = set(occ)
+        targets = occ - self.unpowered_tiles()
         for e in self.entities:  # substations already placed (e.g. a grid inside a lamp screen)
             if e["name"] == "substation":
                 x, y = int(e["position"]["x"]) - 1, int(e["position"]["y"]) - 1

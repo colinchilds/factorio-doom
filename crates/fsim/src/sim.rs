@@ -102,7 +102,7 @@ impl Sim {
         let mut sources = vec![Vec::new(); net_count];
         for (e, ent) in model.entities.iter().enumerate() {
             let outs: &[usize] = match ent.behavior {
-                Behavior::Constant { .. } => &[1, 2],
+                Behavior::Constant { .. } | Behavior::Container => &[1, 2],
                 _ if ent.behavior.is_combinator() => &[3, 4],
                 _ => &[],
             };
@@ -154,6 +154,36 @@ impl Sim {
         if let Behavior::Constant { out, .. } = &self.model.entities[e].behavior {
             self.outputs[e] = if on { out.clone() } else { SigVec::new() };
         }
+    }
+
+    /// Puts `count` of an item into a chest (negative takes them out), as a script in on_tick
+    /// would: networks see it from the next `step`.
+    pub fn insert(&mut self, e: usize, item: &str, count: i32) -> Result<(), String> {
+        if !matches!(self.model.entities[e].behavior, Behavior::Container) {
+            return Err(format!("entity #{} ({}) is not a chest", self.model.entities[e].number, self.model.entities[e].name));
+        }
+        let id = self.model.signals.intern(crate::signals::SignalKey::new("item", item, "normal"));
+        let have = get(&self.outputs[e], id);
+        if have + count < 0 {
+            return Err(format!("chest #{} has {have} {item}, can't take {}", self.model.entities[e].number, -count));
+        }
+        self.outputs[e] = add(&self.outputs[e], &vec![(id, count)]);
+        Ok(())
+    }
+
+    /// Applies the inserts scheduled for simulation tick `t` (a list of [t, entity_number, item,
+    /// count], the format of a case's `fsim.inserts` and of `fsim run --input`).
+    pub fn apply_inserts(&mut self, schedule: &serde_json::Value, t: i64) -> anyhow::Result<()> {
+        for ins in schedule.as_array().into_iter().flatten() {
+            let a = ins.as_array().ok_or_else(|| anyhow::anyhow!("insert entry is not a list"))?;
+            if a.first().and_then(|v| v.as_i64()) != Some(t) {
+                continue;
+            }
+            let num = a[1].as_u64().unwrap_or(0) as u32;
+            let e = self.model.entity_index(num).ok_or_else(|| anyhow::anyhow!("insert: no entity {num}"))?;
+            self.insert(e, a[2].as_str().unwrap_or(""), a[3].as_i64().unwrap_or(0) as i32).map_err(anyhow::Error::msg)?;
+        }
+        Ok(())
     }
 
     fn input(&self, e: usize, c: usize) -> &SigVec {

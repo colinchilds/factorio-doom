@@ -149,6 +149,9 @@ pub enum Behavior {
     Decider(Decider),
     Selector(Selector),
     Lamp(Lamp),
+    /// A chest: its contents (`Sim::insert`) are on its wires like a constant combinator's
+    /// signals, visible on the network the tick after a script inserts them (`chest_read`).
+    Container,
     /// Poles, display panels and anything else: joins wires, sources nothing.
     Passive,
 }
@@ -466,6 +469,7 @@ impl Parser {
                 };
                 Behavior::Lamp(Lamp { condition, colors })
             }
+            "wooden-chest" | "iron-chest" | "steel-chest" => Behavior::Container,
             n => {
                 if !PASSIVE.contains(&n) && !cb.is_null() {
                     self.warnings.push(format!("{n}: control behavior is not simulated"));

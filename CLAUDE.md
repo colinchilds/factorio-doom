@@ -118,9 +118,7 @@ Earlier notes that still hold:
    - Hitscan uses the center column.
    - Enemies are small state machines.
    - The HUD uses display panels.
-6. **Input (unsolved):** vanilla has no keyboard → circuit path. The top idea is a "gate pen":
-   the player stands surrounded by gates, and walls next to them report when a gate opens.
-   Firing needs a separate trigger. Nothing here is prototyped yet.
+6. **Input:** the chest pad, `demos/input_pad.py`; see "Input pad" below.
 7. **Stretch goal:**
    - Angled walls: column lanes become map segments, using lane-wise division for the
      ray/segment intersection.
@@ -224,6 +222,11 @@ The game is the referee, and fsim is the fast development loop:
      - `--bench TICKS`: time each blueprint alone, with no recording; prints median ms per tick.
      - `--signals`: dump the signal order.
      - `--discover`: export a blueprint with every option set, to learn the JSON field names.
+   - Scripted input: a case's `fsim.inserts` (`[k, entity_number, item, count]`, negative
+     removes) puts items into a chest in on_tick at t0 + k, after row k is recorded. fsim applies
+     the same list before simulation tick k (`fsim run --input FILE` takes one too). A chest's
+     contents are on its wires like a constant combinator's signals, from the next tick
+     (`chest_read` case).
 3. **Conformance** (`conformance/`):
    - `bp.py` is a stdlib-only blueprint builder. `power()` places substations until every
      entity tile is covered, counting substations already placed. A solid lamp screen needs
@@ -290,12 +293,52 @@ a script. Built with the netlist compiler at any `--size`.
   - The 64×40 version matches the game on 220,455 checks. Deep pipelines need the harness
     run with `--warmup 60`, so the warm-up state settles before t0 in both the game and fsim.
 
+### Input pad (`demos/input_pad.py`, 2026-11-01)
+
+Decided with the user:
+- **Played in god mode.** A character's camera is centered on it and can't zoom out far enough.
+  In god mode WASD pans the camera, so every input is "hover the mouse over a button, press Z"
+  (drop one item). The user measured holding Z: about 6 drops a second.
+- **A button is an n×n block of chests.** n is 9 at 320×200 and scales with H
+  (`button_size()`, `--button-size`). At the zoom that shows the whole screen, smaller blocks
+  are too hard to hit.
+- **Layout (the user's design):**
+  - A 3n×3n D-pad: forward/back/turn on the edges, combos (forward+turn, ...) on the corners.
+    One cursor can't hold two buttons, so the combos have to be buttons of their own.
+  - Fire is in the middle, drawn as a crosshair (user request).
+  - Steel chests, with arrows in wooden chests.
+  - Use, next weapon and enter sit in a row below, with letters in wood, a display panel icon
+    and an indicator lamp. No strafe for now.
+  - **Limits:**
+    - n ≤ 9: the fire button's chests wire across one ring cell to their sum.
+    - The fire button's indicator lamps (corners = fire, edge middles = directions) only get
+      power if n ≤ substation d − 2, because substations can only sit outside the solid ring.
+      At n = 9 that means legendary; the center tile is out of reach even then.
+- **Held vs pressed** (all buttons at once, lanes = `BUTTON_SIGNALS`):
+  - The chests' total per button goes through a one-tick difference to get drops.
+  - A countdown (two deciders with feedback) holds HELD for `--hold` ticks after each drop.
+    The default was 20; the user found the release too slow, so it is now 14.
+  - PRESSED pulses on the first drop after a release.
+  - Taking items out never counts.
+  - The module docstring has the formulas and timing.
+- **Checks:**
+  - `--verify` compares fsim with the Python reference: 780 scripted ticks with jittered drops,
+    taps and sweeps, 0 differences at n = 3, 5 and 9.
+  - The legendary n=9 pad matches a Space Age game on 28,116 checks (`harness/run.py --dlc`
+    with scripted inserts), and it is fully powered.
+- **Test-pad meters** (`meters=True`), next to the decoder:
+  - a press counter per button;
+  - the longest gap between drops per button (gaps under 60 ticks). The shortest safe
+    `--hold` is that + 1.
+- **Waiting on the user:** the gap meter's reading while holding Z. Set `DEFAULT_HOLD` to it + 1.
+
 ## Status (2026-11-01)
 
 Done:
 - The design above, and checks of the 2.1 features it depends on.
-- fsim, the harness, the conformance suite (11 cases, 806 checks) and the gradient demo. All
-  match the real game exactly.
+- fsim, the harness, the conformance suite (14 cases, including chests) and the gradient demo.
+  All match the real game exactly.
+- The input pad (above): decided with the user, matches the game.
 - Measured semantics: see the README table, and `sim.rs` / `conform.rs` doc comments for the
   timing model.
 - Screen size decided (160×100, aiming for 320×200), and M0 UPS measurements: 320×200 fits.
@@ -307,7 +350,9 @@ Commit only when the user asks.
 
 ## Next steps (in order)
 
-1. **Input prototype** (gate pen) in the game, then M2: movement and collision driven by it.
+1. **M2:** the pad's HELD/PRESSED vectors drive position and angle registers (stateful logic,
+   which the netlist compiler can't express yet: it's feed-forward with a timing-free
+   evaluation), plus collision through the map lookup. Put the pad left of the screen.
 2. **M3:** textures (the sprite demo's strip path, keyed by wall type and texture u from the
    march) and distance shading per texture.
 3. **M4:** sprites, enemies, shooting, HUD, doors. M5 (stretch): angled walls, varying heights.

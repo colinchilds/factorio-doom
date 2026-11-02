@@ -47,6 +47,10 @@ enum Cmd {
         /// Print a network every tick: ENTITY:CONNECTOR (1/2 = red/green in, 3/4 = red/green out).
         #[arg(long = "net")]
         nets: Vec<String>,
+        /// Chest inserts: JSON list of [tick, entity_number, item, count], applied before that
+        /// simulation tick (default: the case's fsim.inserts).
+        #[arg(long)]
+        input: Option<PathBuf>,
     },
     /// Compare fsim with a game dump from harness/run.py.
     Conform {
@@ -89,9 +93,13 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
-        Cmd::Run { blueprint, ticks, start_tick, frames, ppm, gif, every, scale, probes, nets } => {
+        Cmd::Run { blueprint, ticks, start_tick, frames, ppm, gif, every, scale, probes, nets, input } => {
             let m = model::parse(&model::load_file(&blueprint)?)?;
             let ticks = ticks.or_else(|| m.meta.get("ticks").and_then(|t| t.as_u64()).map(|t| t as usize)).unwrap_or(60);
+            let inserts = match &input {
+                Some(p) => serde_json::from_str(&std::fs::read_to_string(p)?)?,
+                None => m.meta.get("inserts").cloned().unwrap_or(serde_json::Value::Null),
+            };
             let mut sim = Sim::new(m, start_tick);
             // After Sim::new: building the networks adds the dropped-wire warnings.
             for w in &sim.model.warnings {
@@ -132,6 +140,7 @@ fn main() -> Result<()> {
             let start = Instant::now();
             let mut sim_time = 0.0;
             for t in 0..ticks {
+                sim.apply_inserts(&inserts, t as i64)?;
                 let s = Instant::now();
                 sim.step();
                 sim_time += s.elapsed().as_secs_f64();

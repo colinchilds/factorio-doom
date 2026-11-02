@@ -58,6 +58,10 @@ python3 harness/run.py --warmup 60 out/dir -o dump.json   # deep pipelines: sett
 # DLC need normal ones; with the DLC: harness/run.py --dlc --bench 30 demos/gen/raycast_160x100.json
 python3 demos/raycast.py --size 64x40 --substation-quality normal
 
+# Input pad (god mode, drop items with Z): check the decoder against its reference model
+python3 demos/input_pad.py --size 320x200 --verify   # -> demos/gen/input_pad_n9.{json,txt}
+./target/release/fsim run demos/gen/input_pad_n9.json --input inserts.json --probe 12  # [[tick, entity, item, count]]
+
 # Sprite demo: generate, check every frame against the reference, preview as a GIF
 python3 demos/sprite.py --size 160x100 --verify    # -> demos/gen/sprite_160x100.{json,txt}
 ./target/release/fsim run demos/gen/sprite_160x100.json --every 2 --scale 4 --gif out/sprite.gif

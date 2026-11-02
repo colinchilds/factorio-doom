@@ -312,6 +312,31 @@ def pole_reach(b):
     b.wire(big, 1, b.arithmetic(213, 0, EACH, "*", 1, EACH), RED_IN)
 
 
+@case(ticks=14)
+def chest_read(b):
+    """When a script insert into a chest shows up on its wire, removals, two chests summed, and a
+    chest on the green wire. The harness inserts after recording row k (fsim.inserts)."""
+    c1 = b.chest(0, 0)
+    c2 = b.chest(1, 0, "wooden-chest")
+    c3 = b.chest(2, 0, "iron-chest")
+    c4 = b.chest(4, 0)
+    copy = b.arithmetic(0, 2, EACH, "+", 0, EACH)               # c1 + c2 + c3 on red
+    total = b.arithmetic(1, 2, EACH, "+", 0, sig("signal-S"))  # their sum as one signal
+    green = b.arithmetic(4, 2, EACH, "*", 1, EACH)             # c4 on green
+    b.wire(c1, 1, c2, 1)
+    b.wire(c2, 1, c3, 1)
+    b.wire(c1, 1, copy, RED_IN)
+    b.wire(copy, RED_IN, total, RED_IN)
+    b.wire(c4, 2, green, GREEN_IN)
+    return {"inserts": [
+        [2, c1, "iron-plate", 1],
+        [5, c2, "iron-plate", 3], [5, c3, "copper-plate", 2], [5, c4, "coal", 7],
+        [6, c1, "iron-plate", 1],
+        [8, c2, "iron-plate", -2],
+        [9, c4, "coal", -7],
+    ]}
+
+
 def main():
     root = pathlib.Path(__file__).parent / "cases"
     root.mkdir(exist_ok=True)
@@ -319,10 +344,10 @@ def main():
         old.unlink()
     for name, (fn, ticks) in CASES.items():
         b = Blueprint(name)
-        fn(b)
+        extra = fn(b) or {}
         b.power()
         data = b.to_json()
-        data["fsim"] = {"ticks": ticks, "doc": (fn.__doc__ or "").strip()}
+        data["fsim"] = {"ticks": ticks, "doc": (fn.__doc__ or "").strip(), **extra}
         (root / f"{name}.json").write_text(json.dumps(data, indent=1))
         print(f"{name}: {len(b.entities)} entities, {ticks} ticks")
 

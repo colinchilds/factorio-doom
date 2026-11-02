@@ -1,0 +1,195 @@
+{
+ "blueprint": {
+  "item": "blueprint",
+  "label": "chest_read",
+  "entities": [
+   {
+    "entity_number": 1,
+    "name": "steel-chest",
+    "position": {
+     "x": 0.5,
+     "y": 0.5
+    }
+   },
+   {
+    "entity_number": 2,
+    "name": "wooden-chest",
+    "position": {
+     "x": 1.5,
+     "y": 0.5
+    }
+   },
+   {
+    "entity_number": 3,
+    "name": "iron-chest",
+    "position": {
+     "x": 2.5,
+     "y": 0.5
+    }
+   },
+   {
+    "entity_number": 4,
+    "name": "steel-chest",
+    "position": {
+     "x": 4.5,
+     "y": 0.5
+    }
+   },
+   {
+    "entity_number": 5,
+    "name": "arithmetic-combinator",
+    "position": {
+     "x": 0.5,
+     "y": 3
+    },
+    "control_behavior": {
+     "arithmetic_conditions": {
+      "operation": "+",
+      "output_signal": {
+       "type": "virtual",
+       "name": "signal-each"
+      },
+      "first_signal": {
+       "type": "virtual",
+       "name": "signal-each"
+      },
+      "second_constant": 0
+     }
+    }
+   },
+   {
+    "entity_number": 6,
+    "name": "arithmetic-combinator",
+    "position": {
+     "x": 1.5,
+     "y": 3
+    },
+    "control_behavior": {
+     "arithmetic_conditions": {
+      "operation": "+",
+      "output_signal": {
+       "type": "virtual",
+       "name": "signal-S"
+      },
+      "first_signal": {
+       "type": "virtual",
+       "name": "signal-each"
+      },
+      "second_constant": 0
+     }
+    }
+   },
+   {
+    "entity_number": 7,
+    "name": "arithmetic-combinator",
+    "position": {
+     "x": 4.5,
+     "y": 3
+    },
+    "control_behavior": {
+     "arithmetic_conditions": {
+      "operation": "*",
+      "output_signal": {
+       "type": "virtual",
+       "name": "signal-each"
+      },
+      "first_signal": {
+       "type": "virtual",
+       "name": "signal-each"
+      },
+      "second_constant": 1
+     }
+    }
+   },
+   {
+    "entity_number": 8,
+    "name": "substation",
+    "position": {
+     "x": -1,
+     "y": 3
+    }
+   }
+  ],
+  "wires": [
+   [
+    1,
+    1,
+    2,
+    1
+   ],
+   [
+    2,
+    1,
+    3,
+    1
+   ],
+   [
+    1,
+    1,
+    5,
+    1
+   ],
+   [
+    5,
+    1,
+    6,
+    1
+   ],
+   [
+    4,
+    2,
+    7,
+    2
+   ]
+  ],
+  "version": 562954249895938
+ },
+ "fsim": {
+  "ticks": 14,
+  "doc": "When a script insert into a chest shows up on its wire, removals, two chests summed, and a\n    chest on the green wire. The harness inserts after recording row k (fsim.inserts).",
+  "inserts": [
+   [
+    2,
+    1,
+    "iron-plate",
+    1
+   ],
+   [
+    5,
+    2,
+    "iron-plate",
+    3
+   ],
+   [
+    5,
+    3,
+    "copper-plate",
+    2
+   ],
+   [
+    5,
+    4,
+    "coal",
+    7
+   ],
+   [
+    6,
+    1,
+    "iron-plate",
+    1
+   ],
+   [
+    8,
+    2,
+    "iron-plate",
+    -2
+   ],
+   [
+    9,
+    4,
+    "coal",
+    -7
+   ]
+  ]
+ }
+}

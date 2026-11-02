@@ -42,7 +42,9 @@ def lua_str(s):
 def write_cases(cases, warmup, mode="run"):
     lines = [f"return {{ mode = {lua_str(mode)}, warmup = {warmup}, cases = {{"]
     for c in cases:
-        lines.append(f"  {{ name = {lua_str(c['name'])}, ticks = {c['ticks']}, bp = {lua_str(c['bp'])} }},")
+        ins = ", ".join(f"{{ {k}, {e}, {lua_str(item)}, {n} }}" for k, e, item, n in c.get("inserts", []))
+        lines.append(f"  {{ name = {lua_str(c['name'])}, ticks = {c['ticks']}, inserts = {{ {ins} }}, "
+                     f"bp = {lua_str(c['bp'])} }},")
     lines.append("} }")
     (MODS / "fsim-harness" / "cases.lua").write_text("\n".join(lines) + "\n")
 
@@ -131,7 +133,8 @@ def load_cases(paths):
         data = json.loads(f.read_text())
         ticks = data.get("fsim", {}).get("ticks", 10)
         bp = {k: v for k, v in data.items() if k != "fsim"}
-        cases.append({"name": f.stem, "ticks": ticks, "bp": encode(bp)})
+        cases.append({"name": f.stem, "ticks": ticks, "bp": encode(bp),
+                      "inserts": data.get("fsim", {}).get("inserts", [])})
     return cases
 
 

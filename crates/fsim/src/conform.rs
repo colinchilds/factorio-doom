@@ -68,7 +68,11 @@ fn check_case(name: String, model: model::Model, rows: &[Value], t0: i64) -> Res
     let n = rows.len();
     let mut outs: Vec<Vec<SigVec>> = Vec::with_capacity(n);
     let mut lamps: Vec<Vec<Option<LampState>>> = Vec::with_capacity(n);
-    for _ in 0..n {
+    // The harness inserts after recording row k, in on_tick at t0 + k; simulation tick k runs at
+    // t0 + k + 1, so the insert lands just before it.
+    let inserts = sim.model.meta.get("inserts").cloned().unwrap_or(Value::Null);
+    for k in 0..n {
+        sim.apply_inserts(&inserts, k as i64)?;
         sim.step();
         outs.push(sim.outputs.clone());
         lamps.push(sim.lamps.clone());

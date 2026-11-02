@@ -5,6 +5,9 @@
 -- harness switches them on (if the blueprint had them on). Row k of a recording is read in on_tick
 -- at game tick T0 + k.
 --
+-- A case's fsim.inserts ({k, entity_number, item, count}) put items into a chest (or take them
+-- out, for a negative count) in on_tick at T0 + k, after row k is recorded.
+--
 -- Mode "bench" builds and switches on the same way but records nothing, so --benchmark-verbose
 -- timings show the blueprint's own cost. It writes fsim/bench.json at T0 (power check, counts).
 
@@ -126,7 +129,8 @@ local function build_case(s, c, origin)
       eei.electric_buffer_size = 1e10
     end
   end
-  return { name = c.name, ticks = c.ticks, entities = entities, constants = constants, rows = {} }
+  return { name = c.name, ticks = c.ticks, entities = entities, constants = constants, rows = {},
+           inserts = c.inserts or {} }
 end
 
 local function read_signals(list)
@@ -215,6 +219,17 @@ script.on_event(defines.events.on_tick, function(e)
     if k <= run.ticks then
       record(run, k)
       active = true
+    end
+    -- Scripted chest inserts (negative count removes), after recording row k.
+    for _, ins in pairs(run.inserts) do
+      if ins[1] == k then
+        local inv = run.entities[ins[2]].get_inventory(defines.inventory.chest)
+        if ins[4] > 0 then
+          assert(inv.insert { name = ins[3], count = ins[4] } == ins[4], run.name .. ": insert failed")
+        else
+          assert(inv.remove { name = ins[3], count = -ins[4] } == -ins[4], run.name .. ": remove failed")
+        end
+      end
     end
   end
   if not active and not storage.written then
