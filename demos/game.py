@@ -328,7 +328,8 @@ def weapon_from_port(g, extra):
     """The weapon picture: a lookup on W * KEYW + A."""
     port = extra["port"]
     K = g.ss(g.ss(g.scalar(port, WEAPON), "*", wp.KEYW), "+", g.ss(g.scalar(port, ANIM), "OR", 0, "anim"), "weapon key")
-    return g.lookup_scalar(K, wp.pictures()[1], 6, "weapon picture")
+    table = wp.pictures()[1]
+    return g.lookup_scalar(K, table, max(table.values()).bit_length(), "weapon picture")
 
 
 def build(w, h, n=None, hold=input_pad.DEFAULT_HOLD, substation_quality=DEFAULT_SUBSTATION_QUALITY,

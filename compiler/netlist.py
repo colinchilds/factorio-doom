@@ -165,6 +165,9 @@ class Graph:
         bits=32 takes negative values as they are (two's complement: bit 31 weighs -2^31). Bits
         with the same key set share one decider outputting their summed weight, so the sign bits
         of a signed table cost one decider."""
+        if bits < 32:
+            bad = [v for v in table.values() if not 0 <= v < 1 << bits]
+            assert not bad, f"lookup {label!r}: values {sorted(set(bad))[:5]} don't fit in {bits} bits"
         out = out or self.new_scalar_signal()
         groups = {}
         for b in range(bits):

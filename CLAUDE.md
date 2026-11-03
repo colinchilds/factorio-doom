@@ -261,7 +261,10 @@ Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► sp
      and back to 0. Per weapon a spend decider at its shots' A values (with an ammo check each,
      so the chaingun's second shot) writes `ammo -cost` into REG's input. Relays (`F + 0`,
      `N + 0`) put fire held and next pressed onto the bus, so every weapon decider reads one
-     network. The raycaster's picture F is a lookup on `W * 256 + A`.
+     network. The raycaster's picture F is a lookup on `W * 256 + A`, its bits sized from the table: the
+     88 pictures need 7, and with 6 (sized for the first 32) the BFG and fist drew the pistol's
+     and shotgun's pictures, which the checks missed (they evaluate the same lookup). The user
+     found it in game; `lookup_scalar` now refuses values that don't fit its bits.
    - **Switching:** a "next" press adds 1 to D. While D > 0 a ready or firing gun starts lowering
      (cancelling a shot); down, each tick with D > 0 steps W and takes 1 from D, then the gun
      rises (and lowers again at once if presses came while it rose). So several quick taps cost
