@@ -344,10 +344,11 @@ def monster_boxes(things):
     return [(int(things[i][0] * FP), int(things[i][1] * FP), cb.alive_terms(things, i)) for i in tc.monsters(things or [])]
 
 
-def camera_from(port, port_pos, things=(), turn=DEFAULT_TURN):
+def camera_from(port, port_pos, things=(), turn=DEFAULT_TURN, light=False):
     """The raycaster's camera from the state port. With things: hides picked-up items, shows each
     monster's frame from its clock and puts the aim (combat.aim_stage) onto the port, i.e. the bus;
-    camera.aim holds those nodes once built."""
+    camera.aim holds those nodes once built. light: the muzzle light (raycast "light" hook) from the
+    weapon key."""
     hidden = set(tc.items(things or []))
     mons = set(tc.monsters(things or []))
 
@@ -398,6 +399,8 @@ def camera_from(port, port_pos, things=(), turn=DEFAULT_TURN):
                  "pos0": (X0, Y0, SPAWN), "hide": hide}
         if mons:
             extra.update(frames=cb.frames(things), frame=frame, aim=aim, thing_pos=pos)
+        if light:
+            extra["light"] = lambda g, ex: (weapon_key(g, ex), wp.light_table())
         return A, PX, PY, extra
     camera.aim = []
     return camera
@@ -424,10 +427,18 @@ def hud_from_port(g, extra):
     return out, {**keys, "ammo": CUR}
 
 
+def weapon_key(g, extra):
+    """W * KEYW + A from the port (built once: the picture and the muzzle light share it)."""
+    if "weapon key" not in extra:
+        port = extra["port"]
+        extra["weapon key"] = g.ss(g.ss(g.scalar(port, WEAPON), "*", wp.KEYW), "+",
+                                   g.ss(g.scalar(port, ANIM), "OR", 0, "anim"), "weapon key")
+    return extra["weapon key"]
+
+
 def weapon_from_port(g, extra):
     """The weapon picture: a lookup on W * KEYW + A."""
-    port = extra["port"]
-    K = g.ss(g.ss(g.scalar(port, WEAPON), "*", wp.KEYW), "+", g.ss(g.scalar(port, ANIM), "OR", 0, "anim"), "weapon key")
+    K = weapon_key(g, extra)
     table = wp.pictures()[1]
     return g.lookup_scalar(K, table, max(table.values()).bit_length(), "weapon picture")
 
@@ -508,7 +519,7 @@ def build(w, h, n=None, hold=input_pad.DEFAULT_HOLD, substation_quality=DEFAULT_
     # Raycaster. Its camera port is a substation left of the column stage, on the lattice row
     # through the top of the screen; that row of substations carries the state bus from REG
     # (right of the screen) across, so there are no poles of its own.
-    cam = camera_from(None, (0, 0), things, turn)
+    cam = camera_from(None, (0, 0), things, turn, light=weapon)
     gr, cols, rows, scal, layout = raycast.build_graph(w, h, cam, Graph(reserved=BUS),
                                                        hole=lattice, tex=tex, flat=flat, things=things, shade=shade,
                                                        hud=hud_from_port if hud else None,
@@ -954,13 +965,20 @@ def verify(path, b, pad, g, nodes, gr, cols, rows, layout, w, h, inserts, ticks,
         return raycast.evaluate(gr, cols, rows, 0, layout, {port: ref_bus[t] if t >= 0 else {}})
 
     sample = list(range(lag + 2, ticks, max(1, ticks // 40)))
+    # Plus frames lit by a muzzle flash (weapons.light), both levels.
+    lv = lambda t: wp.light(ref_bus[t].get(sem.key(WEAPON), 0), ref_bus[t].get(sem.key(ANIM), 0))  # noqa: E731
+    lit = {k: [t for t in range(lag + 2, ticks) if lv(t - lag) == k] for k in (1, 2)}
+    for k, ts in lit.items():
+        sample += ts[::max(1, len(ts) // 6)][:6]
+    sample = sorted(set(sample))
     fbad = []
     for t in sample:
         r = ref_img(t - lag)
         nd = sum(1 for y in range(h) for x in range(w) if (x, y) not in holes and frames[t][y][x] != r[y][x])
         if nd:
             fbad.append((t, nd))
-    print(f"frames: {len(sample)} sampled, raycaster latency {lag}; {len(fbad)} differ {fbad[:5]}")
+    print(f"frames: {len(sample)} sampled ({', '.join(f'{len(ts)} lit at level {k}' for k, ts in lit.items())}), "
+          f"raycaster latency {lag}; {len(fbad)} differ {fbad[:5]}")
     return not bad and not bad_bus and not inside and not fbad
 
 

@@ -172,7 +172,7 @@ def tree(g, level, name, levels=None):
 
 
 def column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_v, shade, hide=None, frame=None, plane=676,
-                 pos=None):
+                 pos=None, light=None):
     """The per-thing scalars, the per-column key/depth vectors and the lookup blocks. Returns a dict
     of nodes for the row stage (all timed against t_v, the wall V's time), and each thing's depth
     and lateral offset ("alpha", "lat": Scalars) for the aim (combat.py).
@@ -188,7 +188,10 @@ def column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_v, shade,
 
     plane: the camera plane (raycast.View). pos(g, i, out_x, out_y): thing i's offset from the
     camera (rx, ry) as Scalars on those signals, ready with the camera position X0 (a moving
-    monster's position from the state bus), or None for its fixed place."""
+    monster's position from the state bus), or None for its fixed place.
+
+    light: the muzzle light's LS = 512 / LK (raycast.LIGHT_K), or None: Dt / LS (about LK times the
+    thing's D) joins the brightness numerator, so things brighten with the walls."""
     if len(things) > 8:
         raise ValueError(f"{len(things)} things: at most 8 fit in the latency budget")
     X0, Y0, (ox, oy) = pos0
@@ -265,8 +268,11 @@ def column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_v, shade,
     # to meet the texel muxes (V + 1).
     wsum = [g.op("arith", sem.arith_spec(EACH, "+", 0, EACH, RED), red=ws, label=f"thing word{j}") for j, ws in enumerate(words)]
     # Brightness where the thing is in front of the wall: VB at V's time, colors one tick later.
-    BRS = g.vv(vec([shade.bright] * w, "bright"), "/", [SD, vec([shade.fog] * w, "fog")], "thing brightness")
-    return {"Zt": Zt, "Dt": Dt, "SK": SK, "FR": FR, "NSD": NSD, "BRS": BRS, "masks": masks, "words": words,
+    # The muzzle light (raycast.LIGHT_K): light is LS = 512 / LK, so Dt / LS ~ LK * SD rides on the
+    # numerator, computed beside SD.
+    lit = [g.vs(Dt, "/", light, "lit thing depth")] if light else []
+    BRS = g.vv([vec([shade.bright] * w, "bright")] + lit, "/", [SD, vec([shade.fog] * w, "fog")], "thing brightness")
+    return {"Zt": Zt, "Dt": Dt, "SK": SK, "FR": FR, "NSD": NSD, "BRS": BRS, "lit": lit, "masks": masks, "words": words,
             "wsum": wsum, "lookups": masks + [n for ws in words for n in ws], "KB": KB, "alpha": alphas, "lat": lats,
             "rows": rows, "trees": (tz, td), "tail": [Zt, Dt, SK, FR, NSD, SD], "tables": [DX, DY, NDY]}
 

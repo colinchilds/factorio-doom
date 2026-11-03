@@ -190,17 +190,25 @@ def key_ranges(keys, shift, base=0):
 class Shading:
     """Screen colors (build parameters; constants in the blueprint, so no combinators or ticks):
     the palette grade (sprite.grade: gamma on the brightest channel, saturation) and the distance
-    to half brightness. Brightness is bright / (D + fog) <= 17, with palette channels <= 15."""
+    to half brightness. Brightness is bright / (D + fog) <= 17, with palette channels <= 15; with
+    the muzzle light (LIGHT_K per extra light level, k) (bright + k D) / (D + fog), still <= 17."""
 
-    def __init__(self, gamma=DEFAULT_GAMMA, saturation=DEFAULT_SATURATION, fog=DEFAULT_FOG):
+    def __init__(self, gamma=DEFAULT_GAMMA, saturation=DEFAULT_SATURATION, fog=DEFAULT_FOG, light=None):
         if not (gamma > 0 and saturation >= 0 and 0 < fog <= 1000):
             raise SystemExit(f"shading: need gamma > 0, saturation >= 0, 0 < fog <= 1000 (got {gamma}, {saturation}, {fog})")
-        self.gamma, self.saturation = gamma, saturation
+        light = LIGHT_K if light is None else light
+        if not 0 <= 2 * light <= 17:
+            raise SystemExit(f"shading: the muzzle light must be 0..8 (got {light})")
+        self.gamma, self.saturation, self.light = gamma, saturation, light
         self.fog = max(1, round(fog * DS))   # in D units
         self.bright = 17 * self.fog
 
     def c4(self, rgb):
         return to_c4(rgb, self.gamma, self.saturation)
+
+    def level(self, d, k=0):
+        """The brightness at distance d (D units), lit by k (LIGHT_K times the extra light level)."""
+        return (self.bright + k * d) // (d + self.fog)
 
     def rgb(self, rgb):
         """An 8-bit color graded the same way (the HUD's colors)."""
@@ -208,10 +216,15 @@ class Shading:
 
     @classmethod
     def from_args(cls, a):
-        return cls(a.gamma, a.saturation, a.fog)
+        return cls(a.gamma, a.saturation, a.fog, a.muzzle_light)
 
 
 DEFAULT_VIEW = dict(fov=None, aspect=1.2, eye=40)   # user request 2026-11-03: taller monsters
+# The muzzle light (user request 2026-11-03): per extra light level (Doom's A_Light1 = 1, A_Light2
+# = 2) the brightness numerator gains LIGHT_K * D, so the dark part of the light curve shrinks by
+# LIGHT_K / 17 per level. 4 is Doom's (1/8 of full per level at the half-bright distance, fog), and
+# it hardly showed on lamps; 6 is a bit stronger (--muzzle-light).
+LIGHT_K = 6
 
 
 class View:
@@ -272,6 +285,9 @@ def shading_args(ap):
                     help="palette gamma on the brightest channel (1 = Freedoom's colors, lower = brighter)")
     ap.add_argument("--saturation", type=float, default=DEFAULT_SATURATION, help="palette saturation (1 = unchanged)")
     ap.add_argument("--fog", type=float, default=DEFAULT_FOG, help="distance in tiles at which walls are half as bright")
+    ap.add_argument("--muzzle-light", type=int, default=LIGHT_K,
+                    help="brightening per extra light level while a weapon flashes (0..8; 0 = none): the dark part "
+                         "of the light curve shrinks by this / 17 per level")
 
 
 # ---------------------------------------------------------------------------------------------
@@ -365,16 +381,16 @@ def flat_word(texels, v, j):
     return sem.i32(sum(texels[v][8 * j + n] << (28 - 4 * n) for n in range(8)))
 
 
-def row_scale(y, h, shade, proj=None, f=1):
+def row_scale(y, h, shade, proj=None, f=1, k=0):
     """Flat sampling for screen row y of a view h rows tall: K with ray * K = the floor offset in
     2^-32 tiles (RAW has the ray at 2^20), and the brightness at that distance (f proj / |r| tiles;
     proj, the projection height in rows, is h unless the HUD crops the view or View sets it; f:
-    View.flat_factor, 1 with the eye half way up)."""
+    View.flat_factor, 1 with the eye half way up; k: the muzzle light, Shading.level)."""
     proj = proj or h
     r = abs(2 * y + 1 - h)
     if f == 1:
-        return round(proj * (1 << 12) / r), shade.bright // (proj * DS // r + shade.fog)
-    return round(f * proj * (1 << 12) / r), shade.bright // (round(f * proj * DS) // r + shade.fog)
+        return round(proj * (1 << 12) / r), shade.level(proj * DS // r, k)
+    return round(f * proj * (1 << 12) / r), shade.level(round(f * proj * DS) // r, k)
 
 
 def flat_color(c4, br):
@@ -434,7 +450,7 @@ def slot_columns(n, hole, x_right=-2):
 
 
 ROLE_GROUPS = [   # a chunk's columns, left to right toward the screen (prefix, ...); k...: its constants
-    ("kky", "fxp", "fyp", "fx", "fy", "w", "fu", "fs", "wd", "tf", "kones", "fpal", "kbr", "fc", "kbg", "sel"),
+    ("kky", "fxp", "fyp", "fx", "fy", "w", "fu", "fs", "wd", "tf", "kones", "fpal", "kbr", "lb", "fc", "kbg", "sel"),
     ("wk",),
     ("kcy", "v", "s", "mux", "e1", "kcsq", "tq", "tp", "tom", "kill", "kcs", "tv", "tnib", "tmux", "tt", "t"),
     ("e2", "pal"),
@@ -615,6 +631,8 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
     keeps the full screen's projection (proj = h), so it is cropped, not squashed.
     weapon(g, extra) -> Scalar: the player's weapon picture (a composite id of demos/weapons.py),
     or None. A compositor per view row (one more tick) puts it in front of everything.
+    extra may hold "light": light(g, extra) -> (key Scalar, {key: extra light level}), the muzzle
+    light (Shading.level): walls, flats and things brighten while the key's level is nonzero.
     view: View (field of view, pixel aspect, eye height).
 
     The row stage and the texture lookup block are fixed nodes left of (and below) the screen,
@@ -650,6 +668,18 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
     if lag > 0:
         A = Scalar(g.delay(A.node, lag), A.signal)
     tabs = camera_tables(extra.pop("angle_offset", 0), view.plane)
+    # The muzzle light: LK = LIGHT_K * level (walls: + LK * D on the brightness numerator; flats: a
+    # decider per level and chunk) and LS = 512 / LK (things: + Dt / LS, Dt being 512 times their D).
+    light = extra.pop("light", None)
+    LK = LS = None
+    if light:
+        lkey, ltab = light(g, extra)
+        lks = {k: shade.light * v for k, v in ltab.items() if v and shade.light}
+        if lks:
+            LK = g.lookup_scalar(lkey, lks, max(lks.values()).bit_length(), "light")
+            # Rounded up, so Dt / LS <= LK * Dt / 512 and the brightness stays <= 17.
+            LS = g.lookup_scalar(lkey, {k: -(-512 // v) for k, v in lks.items()},
+                                 (-(-512 // min(lks.values()))).bit_length(), "light step")
     pos0 = extra.pop("pos0", None)
     hide = extra.pop("hide", None)   # hide(g, i, out): thing i's hide flag (picked-up items), see things.py
     # A may count in 2^sub steps per view angle (finer turning); the tables key on A directly.
@@ -770,7 +800,7 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
     t_V = MV.time + 1 + sp   # the chunks' V
     if things:
         col = th.column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_V - sp, shade, hide, frame,
-                              view.plane, extra.pop("thing_pos", None))
+                              view.plane, extra.pop("thing_pos", None), LS)
         if aim:
             aim(g, col, [MV, MH], cols[w // 2])
 
@@ -798,8 +828,15 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
                         [sem.out(EACH, constant=strip_word(t["texels"], u, j))], red=TK, green=MS,
                         label=f"strip{side}.{t['name']}.{u}.{j}"))
     # Palettes per lane (the nearest side's texture), times brightness: one bus per texel value.
+    # The muzzle light's product (LK * D) makes the brightness a tick later; the palettes wait for
+    # it on their inputs (four delays, not one per color bus). The spread had a tick of slack.
     pal = {c: [] for c in range(1, COLORS + 1)}
-    for side, TK, MS in sides:
+    n_lit = len(g.nodes)
+    psides = sides
+    if LK:
+        psides = [(side, g.op("arith", sem.arith_spec(EACH, "+", 0, EACH, RED), red=TK, label=f"delay texkey{side}"),
+                   g.delay(MS, 1)) for side, TK, MS in sides]
+    for side, TK, MS in psides:
         for ty, t in enumerate(textures):
             rng = [sem.cond(EACH, ">=", (ty + 1) << 12, RED), sem.cond(EACH, "<", (ty + 2) << 12, RED, "and"),
                    sem.cond(EACH, ">", 0, GREEN, "and")]
@@ -807,7 +844,8 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
                 if c <= len(t["c4"]):
                     pal[c].append(g.decider(rng, [sem.out(EACH, constant=side_color(t["c4"][c - 1], side))],
                                             red=TK, green=MS, label=f"pal{side}.{t['name']}.{c}"))
-    BR = g.vv(vec([shade.bright] * w, "bright"), "/", [MV, MH, vec([shade.fog] * w, "fog")], "brightness")
+    LD = [g.vs([MV, MH], "*", LK, "lit distance")] if LK else []
+    BR = g.vv([vec([shade.bright] * w, "bright")] + LD, "/", [MV, MH, vec([shade.fog] * w, "fog")], "brightness")
     CT = {c: g.vv(pal[c], "*", BR, f"color{c}") for c in pal}
 
     # -- chunks: k screen rows per network, row q of a chunk on quality q of its columns' lanes.
@@ -954,8 +992,19 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
             ones = node["kones"] = cv(ch, lambda x, y: 1, "ones")
             fci = [g.decider(nib(c) + [sem.cond(EACH, "!=", 0, GREEN, "and")], [sem.out(EACH, constant=pack(c4) or 1)],
                              red=Tf, green=ones, label=f"fpal{y0}.{c}") for c, c4 in enumerate(part["c4"])]
-            node["kbr"] = cv(ch, lambda x, y: max(1, row_scale(y, hv, shade, proj, ff)[1]), "flat brightness")
-            FC = g.vv(fci, "*", node["kbr"], f"flat{y0}")
+            kbr = lambda x, y, k=0: max(1, row_scale(y, hv, shade, proj, ff, k)[1])  # noqa: E731
+            node["kbr"] = cv(ch, kbr, "flat brightness")
+            # The muzzle light: per level a decider adds the brightness gained on that row.
+            lbs = []
+            for lk in sorted(set(lks.values())) if LK else ():
+                gain = [(lane(x, q), kbr(x, y0 + q, lk) - kbr(x, y0 + q)) for q in range(n) for x in range(w)]
+                gain = [sem.out(s_, constant=v) for s_, v in gain if v]
+                if gain:
+                    tf = fci[0].time
+                    lbs.append(Node(g, "decider", sem.decider_spec([sem.cond(LK.signal, "=", lk, RED)], gain),
+                                    red=[at(LK.node, tf - 1)], time=tf, label=f"flat light{y0}.{lk}"))
+            node.update({f"lb{i}": d for i, d in enumerate(lbs)})
+            FC = g.vv(fci, "*", [node["kbr"]] + lbs, f"flat{y0}")
             node.update({"fu": sf.red[0], "fs": sf, "wd": wd, "tf": Tf, "fc": FC, **{f"fpal{c}": d for c, d in enumerate(fci)}})
         else:
             FC = node["kbg"] = cv(ch, lambda x, y: pack(background(y, hv)), "background")
@@ -1012,11 +1061,14 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
         extra["hud"] = (hs, sigs)
     if arms:
         extra["weapon"] = WF
+    if LK:
+        extra["light"] = LK
     lookups = (col["lookups"] if things else [], [n for ws in words for n in ws])
     area = [n for n in g.nodes[n_area:] if n.kind != "const" and not any(n in u.values() for u in units)]
-    area += [n for _, ns in bus_nodes for n in ns] + list(CT.values()) + [BR] + [n for ps in pal.values() for n in ps]
+    area += [n for _, ns in bus_nodes for n in ns] + list(CT.values()) + [BR] + LD + [n for ps in pal.values() for n in ps]
+    area += [n for n in g.nodes[n_lit:n_area] if n.kind != "const"]
     if things:
-        area += col["wsum"] + [col["NSD"], col["BRS"]]
+        area += col["wsum"] + [col["NSD"], col["BRS"]] + col["lit"]
     area = list({n.id: n for n in area if n.kind != "const"}.values())
     x_right = place_chunks(g, w, chunks, units, area, lookups, hole, k, mgrid)
     layout = {"x_right": x_right, "textures": textures, "tex": tex, "flats": flats, "flat": flat, "things": things,

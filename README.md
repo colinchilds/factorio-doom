@@ -73,6 +73,7 @@ python3 demos/raycast.py --size 160x100 --verify   # -> demos/gen/raycast_160x10
 python3 demos/raycast.py --size 64x40 --tex 32 --verify --every 1   # smaller textures, every frame
 python3 demos/raycast.py --size 160x100 --flat 0   # untextured floor/ceiling (cheaper); --flat 8/16/32
 python3 demos/game.py --size 320x200 --gamma 0.4 --fog 12   # brighter screen (--gamma 1 --saturation 1 --fog 4: Freedoom's colors)
+python3 demos/game.py --size 160x100 --muzzle-light 8   # stronger muzzle flash (default 6, Doom's 4, 0 = none)
 python3 demos/raycast.py --size 160x100 --no-things   # without the monsters and items (also game.py)
 python3 demos/game.py --size 160x100 --no-hud      # without the status bar: the view takes the whole screen
 python3 demos/game.py --size 160x100 --no-weapon   # without the weapon in front of the view

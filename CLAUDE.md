@@ -509,6 +509,29 @@ Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► sp
         before). 320×200: 78,155 entities, 1.14 ms per tick in Space Age (1.02 before), fully
         powered; blueprint string 7.3 MB.
 
+16. **Muzzle light (2026-11-03, user request):** Doom's flash states call A_Light1 / A_Light2, which
+    raise `extralight` by 1 or 2 light levels until S_LIGHTDONE: the whole view (not the status
+    bar) brightens while a weapon flashes.
+    - **Levels:** each flash frame carries its level (`WEAPONS[...]["flashes"]`: (frame, tics,
+      light), from info.c: pistol 1, shotgun 1 then 2, chaingun 1 / 2, rocket 1, 1, 2, 2, plasma 1,
+      BFG 1 then 2); `weapons.light_table()` maps `W * KEYW + A` to it.
+    - **Brightness:** `Shading.level(D, k)` = (bright + k D) / (D + fog) with k = `--muzzle-light`
+      (default 6) times the level: the dark part of the light curve shrinks by k / 17, never above
+      17, so no channel overflows. Doom's own strength is about 4 (1/8 of full per level at the
+      half-bright distance), which hardly showed in previews; 8 at level 2 is nearly full bright.
+    - **Circuit:** the raycaster's `light` hook (game.py: the weapon key, shared with the picture
+      lookup) gives two lookups, LK = k × level and LS = ceil(512 / LK). Walls: LK × D joins the
+      brightness numerator (one product; the palette deciders wait a tick on their inputs, four
+      delays, using the tick of slack before the spread). Things: Dt / LS (about LK × their D)
+      beside SD. Flats: per chunk and level one decider adding that row's brightness gain onto the
+      constant brightness vector (role `lb`). No latency.
+    - **Cost:** 8,848 / 10,044 / 12,266 combinators at 64×40 / 160×100 / 320×200 (25 / 41 / 69
+      more). Without a weapon the raycaster's blueprint is byte-identical.
+    - **Checks:** game `--verify` adds frames lit at each level to the samples: 0 differ at 64×40,
+      160×100 and 320×200 (latency 17). The 64×40 game matches a Space Age game on 13,352,913
+      checks (`--dlc --warmup 60 --every 2`). 320×200: 78,260 entities, 1.13 ms per tick in Space
+      Age, fully powered.
+
 Still to come (M4): doors; see "Next steps".
 
 Earlier notes that still hold:
@@ -945,6 +968,7 @@ Done:
 - Death and restart (architecture item 13): frozen at health 0, Use starts a new game.
 - View geometry (architecture item 14): Doom's pixel aspect and eye height, so monsters stand tall.
 - Monsters (architecture item 15): wake, chase around walls, attack on Doom's timing, flinch.
+- Muzzle light (architecture item 16): the view brightens while a weapon flashes.
 - Chunks, layout and latency (architecture item 12): six rows per network on signal qualities
   (Space Age), about half the combinators, layout by concept, the bus on a substation row, 17-tick
   raycaster.
@@ -965,11 +989,16 @@ Commit only when the user asks.
      in the ARMS panel once there are pickups; all are more slots of the same kind.
    - Weapon follow-ups:
      pickups (weapons owned, ammo); the walking bob (it moves sideways too: about 10× the
-     pictures, or a different way to draw the gun); Doom's muzzle light (A_Light1 brightens the view: a brightness term on
-     the bus); the chainsaw and super shotgun.
+     pictures, or a different way to draw the gun); the chainsaw and super shotgun.
    - Contact follow-ups: Doom's blue armor class (absorbs a half; one class now), the face's ouch
      frame on a hit. Death follow-ups (item 13): the view dropping to the floor (Doom lowers the
-     eye), a red tint on hits, the music restarting on a restart (M6).
+     eye), the music restarting on a restart (M6).
+   - Screen flashes (Doom's ST_doPaletteStuff, asked about 2026-11-03): a hit adds the damage to
+     `damagecount` (at most 100, minus 1 a tic) and the screen takes red palette (count + 7) >> 3
+     (1..8); a pickup adds 6 to `bonuscount` (gold palettes 1..4). The whole screen tints,
+     status bar included: color × (1 - f) + tint × f. Walls, flats and things could scale through
+     the brightness (as the muzzle light) plus a red broadcast per chunk; the weapon's and the
+     bar's colors are exact constants, so they need another way.
    - Thing follow-ups: more than 8 things (a fourth tree level costs a tick, or sort by depth on
      scalars); a second nearest layer so overlapping things don't cut each other.
 2. **M6: audio (planned 2026-11-02, user request).** Music on a loop and sound effects, with

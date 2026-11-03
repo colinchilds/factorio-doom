@@ -53,27 +53,29 @@ AMMO_TYPES = ["bullets", "shells", "rockets", "cells"]
 
 # Doom's weapons in "next weapon" order from the pistol. states: (frame, tics, actions) with
 # actions "fire", "flash" (flash sequence 0) / "flashN", "refire" (A_ReFire on entering).
-# flashes: [(frame, tics)] sequences. Freedoom's art, Doom's timing (plasma: flash A only).
+# flashes: [(frame, tics, light)] sequences, light being the extra light level the flash state
+# sets (A_Light1 / A_Light2; S_LIGHTDONE's A_Light0 ends it). Freedoom's art, Doom's timing
+# (plasma: flash A only).
 WEAPONS = [
     {"name": "pistol", "slot": 2, "sprite": "PISG", "flash": "PISF", "ammo": "bullets", "cost": 1,
      "states": [("A", 4, ""), ("B", 6, "fire flash"), ("C", 4, ""), ("B", 5, "refire")],
-     "flashes": [[("A", 7)]]},
+     "flashes": [[("A", 7, 1)]]},
     {"name": "shotgun", "slot": 3, "sprite": "SHTG", "flash": "SHTF", "ammo": "shells", "cost": 1,
      "states": [("A", 3, ""), ("A", 7, "fire flash"), ("B", 5, ""), ("C", 5, ""), ("D", 4, ""), ("C", 5, ""),
                 ("B", 5, ""), ("A", 3, ""), ("A", 7, "refire")],
-     "flashes": [[("A", 4), ("B", 3)]]},
+     "flashes": [[("A", 4, 1), ("B", 3, 2)]]},
     {"name": "chaingun", "slot": 4, "sprite": "CHGG", "flash": "CHGF", "ammo": "bullets", "cost": 1,
      "states": [("A", 4, "fire flash0"), ("B", 4, "fire flash1"), ("B", 0, "refire")],
-     "flashes": [[("A", 5)], [("B", 5)]]},
+     "flashes": [[("A", 5, 1)], [("B", 5, 2)]]},
     {"name": "rocket launcher", "slot": 5, "sprite": "MISG", "flash": "MISF", "ammo": "rockets", "cost": 1,
      "states": [("B", 8, "flash"), ("B", 12, "fire"), ("B", 0, "refire")],
-     "flashes": [[("A", 3), ("B", 4), ("C", 4), ("D", 4)]]},
+     "flashes": [[("A", 3, 1), ("B", 4, 1), ("C", 4, 2), ("D", 4, 2)]]},
     {"name": "plasma rifle", "slot": 6, "sprite": "PLSG", "flash": "PLSF", "ammo": "cells", "cost": 1,
      "states": [("A", 3, "fire flash"), ("B", 20, "refire")],
-     "flashes": [[("A", 4)]]},
+     "flashes": [[("A", 4, 1)]]},
     {"name": "BFG", "slot": 7, "sprite": "BFGG", "flash": "BFGF", "ammo": "cells", "cost": 40,
      "states": [("A", 20, ""), ("B", 10, "flash"), ("B", 10, "fire"), ("B", 20, "refire")],
-     "flashes": [[("A", 11), ("B", 6)]]},
+     "flashes": [[("A", 11, 1), ("B", 6, 2)]]},
     {"name": "fist", "slot": 1, "sprite": "PUNG", "flash": None, "ammo": None, "cost": 0,
      "states": [("B", 4, ""), ("C", 4, "fire"), ("D", 5, ""), ("C", 4, ""), ("B", 5, "refire")],
      "flashes": []},
@@ -123,23 +125,24 @@ def timeline(wp):
                 refire = t
         gun += [f"{wp['sprite']}{frame}0"] * n
         t += n
-    flash = [None] * total
+    flash, light = [None] * total, [0] * total
     for s, seq in flash_start:   # a later flash replaces an earlier one
         k = s
-        for frame, n in seq:
+        for frame, n, lv in seq:
             for _ in range(n):
                 if k < total:
-                    flash[k] = f"{wp['flash']}{frame}0"
+                    flash[k], light[k] = f"{wp['flash']}{frame}0", lv
                 k += 1
         for k in range(k, total):
             if flash[k] and k >= s:
-                flash[k] = None
+                flash[k], light[k] = None, 0
     L = ticks(total)
-    frames = []
+    frames, lights = [], []
     for e in range(L):
         tic = min(total - 1, e * TICS // UPS)
         frames.append((gun[tic], flash[tic]))
-    return {"frames": frames, "ready": (f"{wp['sprite']}A0", None), "L": L, "R": ticks(refire),
+        lights.append(light[tic])
+    return {"frames": frames, "lights": lights, "ready": (f"{wp['sprite']}A0", None), "L": L, "R": ticks(refire),
             "fire": [ticks(f) + 1 for f in fire]}
 
 
@@ -248,6 +251,18 @@ def pictures():
                 ids[c] = len(comps)
             table[wi * KEYW + a] = ids[c]
     return comps, table
+
+
+def light_table():
+    """{W * KEYW + A: extra light level} where a flash lights the view (Doom's extralight: the
+    flash states' A_Light1 / A_Light2), only the nonzero entries."""
+    return {wi * KEYW + a: lv for wi, tl in enumerate(map(timeline, WEAPONS))
+            for a, lv in enumerate(tl["lights"], 1) if lv}
+
+
+def light(W, A):
+    """The extra light level while weapon W shows animation tick A (0 when not firing)."""
+    return light_table().get(W * KEYW + A, 0)
 
 
 def picture_count():
