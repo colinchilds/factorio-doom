@@ -218,6 +218,14 @@ class Weapons:
         """Composites in the busiest row (overlay slots per row)."""
         return max((len(v) for v in self.rows.values()), default=0)
 
+    def chunk(self, y0, n):
+        """{composite id: [(x, y, packed)]} for the composites with pixels in rows y0 .. y0 + n - 1."""
+        out = {}
+        for y in range(y0, y0 + n):
+            for cid, px in self.rows.get(y, []):
+                out.setdefault(cid, []).extend((x, y, v) for x, v in px)
+        return out
+
     def overlay(self, img, cid):
         """Draw composite cid over img (rows of packed colors) in place (0: none)."""
         if not cid:

@@ -1,0 +1,589 @@
+{
+ "blueprint": {
+  "item": "blueprint",
+  "label": "quality_ops",
+  "entities": [
+   {
+    "entity_number": 1,
+    "name": "constant-combinator",
+    "position": {
+     "x": 0.5,
+     "y": 0.5
+    },
+    "control_behavior": {
+     "sections": {
+      "sections": [
+       {
+        "index": 1,
+        "filters": [
+         {
+          "index": 1,
+          "name": "iron-plate",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 5
+         },
+         {
+          "index": 2,
+          "name": "iron-plate",
+          "quality": "uncommon",
+          "comparator": "=",
+          "count": 7
+         },
+         {
+          "index": 3,
+          "type": "virtual",
+          "name": "signal-A",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 100
+         },
+         {
+          "index": 4,
+          "name": "copper-plate",
+          "quality": "quality-unknown",
+          "comparator": "=",
+          "count": 3
+         },
+         {
+          "index": 5,
+          "type": "virtual",
+          "name": "signal-R",
+          "quality": "normal",
+          "comparator": "=",
+          "count": 16719872
+         },
+         {
+          "index": 6,
+          "name": "copper-plate",
+          "quality": "legendary",
+          "comparator": "=",
+          "count": 11
+         },
+         {
+          "index": 7,
+          "name": "copper-plate",
+          "quality": "rare",
+          "comparator": "=",
+          "count": 1000
+         },
+         {
+          "index": 8,
+          "type": "virtual",
+          "name": "signal-R",
+          "quality": "epic",
+          "comparator": "=",
+          "count": 65344
+         },
+         {
+          "index": 9,
+          "type": "virtual",
+          "name": "signal-B",
+          "quality": "uncommon",
+          "comparator": "=",
+          "count": -9
+         }
+        ]
+       }
+      ]
+     }
+    }
+   },
+   {
+    "entity_number": 2,
+    "name": "selector-combinator",
+    "position": {
+     "x": 1.5,
+     "y": 1
+    },
+    "control_behavior": {
+     "operation": "quality-transfer",
+     "quality_source_static": {
+      "name": "normal"
+     },
+     "quality_destination_signal": {
+      "type": "virtual",
+      "name": "signal-each"
+     }
+    }
+   },
+   {
+    "entity_number": 3,
+    "name": "selector-combinator",
+    "position": {
+     "x": 3.5,
+     "y": 1
+    },
+    "control_behavior": {
+     "operation": "quality-transfer",
+     "quality_source_static": {
+      "name": "uncommon"
+     },
+     "quality_destination_signal": {
+      "type": "virtual",
+      "name": "signal-each"
+     }
+    }
+   },
+   {
+    "entity_number": 4,
+    "name": "selector-combinator",
+    "position": {
+     "x": 5.5,
+     "y": 1
+    },
+    "control_behavior": {
+     "operation": "quality-transfer",
+     "quality_source_static": {
+      "name": "rare"
+     },
+     "quality_destination_signal": {
+      "type": "virtual",
+      "name": "signal-each"
+     }
+    }
+   },
+   {
+    "entity_number": 5,
+    "name": "selector-combinator",
+    "position": {
+     "x": 7.5,
+     "y": 1
+    },
+    "control_behavior": {
+     "operation": "quality-transfer",
+     "quality_source_static": {
+      "name": "epic"
+     },
+     "quality_destination_signal": {
+      "type": "virtual",
+      "name": "signal-each"
+     }
+    }
+   },
+   {
+    "entity_number": 6,
+    "name": "selector-combinator",
+    "position": {
+     "x": 9.5,
+     "y": 1
+    },
+    "control_behavior": {
+     "operation": "quality-transfer",
+     "quality_source_static": {
+      "name": "legendary"
+     },
+     "quality_destination_signal": {
+      "type": "virtual",
+      "name": "signal-each"
+     }
+    }
+   },
+   {
+    "entity_number": 7,
+    "name": "selector-combinator",
+    "position": {
+     "x": 11.5,
+     "y": 1
+    },
+    "control_behavior": {
+     "operation": "quality-transfer",
+     "quality_source_static": {
+      "name": "quality-unknown"
+     },
+     "quality_destination_signal": {
+      "type": "virtual",
+      "name": "signal-each"
+     }
+    }
+   },
+   {
+    "entity_number": 8,
+    "name": "selector-combinator",
+    "position": {
+     "x": 1.5,
+     "y": 4
+    },
+    "control_behavior": {
+     "operation": "quality-filter",
+     "quality_filter": {
+      "quality": "uncommon",
+      "comparator": "="
+     }
+    }
+   },
+   {
+    "entity_number": 9,
+    "name": "selector-combinator",
+    "position": {
+     "x": 3.5,
+     "y": 4
+    },
+    "control_behavior": {
+     "operation": "quality-filter",
+     "quality_filter": {
+      "quality": "rare",
+      "comparator": "!="
+     }
+    }
+   },
+   {
+    "entity_number": 10,
+    "name": "selector-combinator",
+    "position": {
+     "x": 5.5,
+     "y": 4
+    },
+    "control_behavior": {
+     "operation": "quality-filter",
+     "quality_filter": {
+      "quality": "rare",
+      "comparator": ">="
+     }
+    }
+   },
+   {
+    "entity_number": 11,
+    "name": "selector-combinator",
+    "position": {
+     "x": 7.5,
+     "y": 4
+    },
+    "control_behavior": {
+     "operation": "quality-filter",
+     "quality_filter": {
+      "quality": "quality-unknown",
+      "comparator": "="
+     }
+    }
+   },
+   {
+    "entity_number": 12,
+    "name": "arithmetic-combinator",
+    "position": {
+     "x": 9.5,
+     "y": 4
+    },
+    "control_behavior": {
+     "arithmetic_conditions": {
+      "operation": "*",
+      "output_signal": {
+       "type": "virtual",
+       "name": "signal-each"
+      },
+      "first_signal": {
+       "type": "virtual",
+       "name": "signal-each"
+      },
+      "second_constant": 2
+     }
+    }
+   },
+   {
+    "entity_number": 13,
+    "name": "selector-combinator",
+    "position": {
+     "x": 11.5,
+     "y": 4
+    },
+    "control_behavior": {
+     "operation": "quality-transfer",
+     "quality_source_static": {
+      "name": "epic"
+     },
+     "quality_destination_signal": {
+      "type": "virtual",
+      "name": "signal-each"
+     }
+    }
+   },
+   {
+    "entity_number": 14,
+    "name": "decider-combinator",
+    "position": {
+     "x": 13.5,
+     "y": 4
+    },
+    "control_behavior": {
+     "decider_conditions": {
+      "conditions": [
+       {
+        "comparator": ">",
+        "first_signal": {
+         "type": "virtual",
+         "name": "signal-each"
+        },
+        "constant": 6
+       }
+      ],
+      "outputs": [
+       {
+        "signal": {
+         "type": "virtual",
+         "name": "signal-each"
+        }
+       }
+      ],
+      "else_outputs": [
+       {
+        "signal": {
+         "type": "virtual",
+         "name": "signal-each"
+        }
+       }
+      ]
+     }
+    }
+   },
+   {
+    "entity_number": 15,
+    "name": "decider-combinator",
+    "position": {
+     "x": 15.5,
+     "y": 4
+    },
+    "control_behavior": {
+     "decider_conditions": {
+      "conditions": [
+       {
+        "comparator": "<",
+        "first_signal": {
+         "type": "virtual",
+         "name": "signal-each"
+        },
+        "first_signal_networks": {
+         "red": true,
+         "green": false
+        },
+        "second_signal": {
+         "type": "virtual",
+         "name": "signal-each"
+        },
+        "second_signal_networks": {
+         "red": false,
+         "green": true
+        }
+       }
+      ],
+      "outputs": [
+       {
+        "signal": {
+         "type": "virtual",
+         "name": "signal-each"
+        },
+        "networks": {
+         "red": true,
+         "green": false
+        }
+       }
+      ],
+      "else_outputs": [
+       {
+        "signal": {
+         "type": "virtual",
+         "name": "signal-each"
+        },
+        "networks": {
+         "red": false,
+         "green": true
+        }
+       }
+      ]
+     }
+    }
+   },
+   {
+    "entity_number": 16,
+    "name": "small-lamp",
+    "position": {
+     "x": 13.5,
+     "y": 0.5
+    },
+    "control_behavior": {
+     "use_colors": true,
+     "color_mode": 2,
+     "rgb_signal": {
+      "type": "virtual",
+      "name": "signal-R"
+     }
+    },
+    "always_on": true
+   },
+   {
+    "entity_number": 17,
+    "name": "small-lamp",
+    "position": {
+     "x": 14.5,
+     "y": 0.5
+    },
+    "control_behavior": {
+     "use_colors": true,
+     "color_mode": 2,
+     "rgb_signal": {
+      "type": "virtual",
+      "name": "signal-R",
+      "quality": "epic"
+     }
+    },
+    "always_on": true
+   },
+   {
+    "entity_number": 18,
+    "name": "small-lamp",
+    "position": {
+     "x": 15.5,
+     "y": 0.5
+    },
+    "control_behavior": {
+     "use_colors": true,
+     "color_mode": 2,
+     "rgb_signal": {
+      "type": "virtual",
+      "name": "signal-R",
+      "quality": "rare"
+     }
+    },
+    "always_on": true
+   },
+   {
+    "entity_number": 19,
+    "name": "substation",
+    "position": {
+     "x": -1,
+     "y": 1
+    },
+    "quality": "legendary"
+   },
+   {
+    "entity_number": 20,
+    "name": "substation",
+    "position": {
+     "x": 14,
+     "y": 2
+    },
+    "quality": "legendary"
+   }
+  ],
+  "wires": [
+   [
+    1,
+    1,
+    2,
+    1
+   ],
+   [
+    2,
+    1,
+    3,
+    1
+   ],
+   [
+    3,
+    1,
+    4,
+    1
+   ],
+   [
+    4,
+    1,
+    5,
+    1
+   ],
+   [
+    5,
+    1,
+    6,
+    1
+   ],
+   [
+    6,
+    1,
+    7,
+    1
+   ],
+   [
+    1,
+    1,
+    8,
+    1
+   ],
+   [
+    8,
+    1,
+    9,
+    1
+   ],
+   [
+    9,
+    1,
+    10,
+    1
+   ],
+   [
+    10,
+    1,
+    11,
+    1
+   ],
+   [
+    11,
+    1,
+    12,
+    1
+   ],
+   [
+    12,
+    1,
+    13,
+    1
+   ],
+   [
+    13,
+    3,
+    14,
+    1
+   ],
+   [
+    13,
+    3,
+    15,
+    1
+   ],
+   [
+    14,
+    4,
+    15,
+    2
+   ],
+   [
+    1,
+    1,
+    16,
+    1
+   ],
+   [
+    16,
+    1,
+    17,
+    1
+   ],
+   [
+    17,
+    1,
+    18,
+    1
+   ],
+   [
+    7,
+    3,
+    18,
+    1
+   ]
+  ],
+  "version": 562954249895938
+ },
+ "fsim": {
+  "ticks": 6,
+  "doc": "Quality as a lane axis. Selector quality transfer (static quality, destination Each) re-tags\n    every input at one quality, summing signals that differ only in quality; to every quality,\n    quality-unknown included. Quality filter keeps one quality (=, != and a level comparison).\n    Each arithmetic and Each deciders keep qualities apart; a lamp reads a signal at a quality."
+ }
+}

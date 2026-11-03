@@ -1,6 +1,6 @@
 """Thing contact (M4, 2026-11-02, user request): items are picked up when you walk over them, and a
-monster hurts you while you stand close to it. Monsters are also solid (game.player_graph adds
-their boxes to the wall corners).
+live monster hurts you while you stand close to it. Live monsters are also solid (game.player_graph
+adds their boxes to the wall corners). Dead ones (combat.py) are neither.
 
 Everything here reads the state bus (REG's red output, game.py) and is one tick deep, like the
 weapon logic:
@@ -136,6 +136,7 @@ class Logic:
     def specs(self):
         """[(label, spec, "bus" | "reg")], like weapons.logic: "bus" ones write the bus, "reg" ones
         REG's input."""
+        import combat  # noqa: E402 (combat imports this module)
         res = []
         its = items(self.things)
         if its:
@@ -154,7 +155,8 @@ class Logic:
             conds = []
             for i in ms:
                 x, y, _ = self.things[i]
-                conds += self._clause(_box(x, y, self.spawn, REACH) + [(COOL, "=", 0)] + self.alive(), not conds)
+                conds += self._clause(_box(x, y, self.spawn, REACH) + [(COOL, "=", 0)] + self.alive()
+                                      + combat.alive_terms(self.things, i), not conds)
             res.append(("pain start", sem.decider_spec(conds, [sem.out(COOL, constant=COOLDOWN)]), "bus"))
             # > 1, not > 0: at 1 the two outputs would sum to 0, which the game reports as a 0-valued
             # signal on the decider (fsim leaves it out); no output reads 0 all the same.
@@ -174,7 +176,9 @@ class Logic:
 
 def step(things, spawn, start, bus):
     """The rules in plain Python. bus: {"SX", "SY", "health", "armor", ammo..., "gone": [..],
-    "cool"} (REG's offsets, as on the bus). Returns (gone, cool, increments {stat: delta})."""
+    "cool", "dmg": [..]} (REG's offsets, as on the bus; dmg: each monster's damage taken, combat.py).
+    Returns (gone, cool, increments {stat: delta})."""
+    import combat  # noqa: E402
     val = {k: bus[k] + start[k] for k in start}
     alive = val["health"] > 0
     gone = list(bus["gone"])
@@ -190,6 +194,8 @@ def step(things, spawn, start, bus):
     if bus["cool"] == 0 and alive:
         for i in monsters(things):
             x, y, _ = things[i]
+            if bus["dmg"][i] >= combat.hp(things[i][2]):
+                continue   # dead
             dx, dy = bus["SX"] + spawn[0] - int(x * FP), bus["SY"] + spawn[1] - int(y * FP)
             if abs(dx) < REACH and abs(dy) < REACH:
                 cool = COOLDOWN   # one start decider (an OR over the monsters)

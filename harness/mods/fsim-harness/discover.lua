@@ -54,6 +54,31 @@ return function(e)
   local sel2 = s.create_entity { name = "selector-combinator", position = { 6.5, 1 }, force = f }
   sel2.get_or_create_control_behavior().parameters = { operation = "time", game_tick_signal = sig("signal-T") }
 
+  -- Quality transfer (needs the quality mod: run with --dlc): every input signal re-tagged with one quality.
+  local qt = s.create_entity { name = "selector-combinator", position = { 16.5, 1 }, force = f }
+  local qok, qerr = pcall(function()
+    qt.get_or_create_control_behavior().parameters = { operation = "quality-transfer", select_quality_from_signal = false,
+      quality_source_static = { name = "rare" }, quality_destination_signal = sig("signal-each") }
+  end)
+  local qt_params = serpent.block(qt.get_control_behavior().parameters)
+  local qt3 = s.create_entity { name = "selector-combinator", position = { 22.5, 1 }, force = f }
+  pcall(function()
+    qt3.get_or_create_control_behavior().parameters = { operation = "quality-transfer", select_quality_from_signal = false,
+      quality_source_static = { name = "rare" }, quality_destination_signal = sig("signal-A") }
+  end)
+  qt_params = qt_params .. serpent.block(qt3.get_control_behavior().parameters)
+  local qt2 = s.create_entity { name = "selector-combinator", position = { 20.5, 1 }, force = f }
+  local q2ok, q2err = pcall(function()
+    qt2.get_or_create_control_behavior().parameters = { operation = "quality-transfer", select_quality_from_signal = true,
+      quality_source_signal = sig("signal-Q"), quality_destination_signal = sig("signal-each") }
+  end)
+  local qt2_params = serpent.block(qt2.get_control_behavior().parameters)
+  local qf = s.create_entity { name = "selector-combinator", position = { 18.5, 1 }, force = f }
+  local fok, ferr = pcall(function()
+    qf.get_or_create_control_behavior().parameters = { operation = "quality-filter",
+      quality_filter = { quality = "epic", comparator = "=" } }
+  end)
+
   local cc = s.create_entity { name = "constant-combinator", position = { 8.5, 0.5 }, force = f }
   local sec = cc.get_or_create_control_behavior().get_section(1)
   sec.set_slot(1, { value = { type = "virtual", name = "signal-A", quality = "normal" }, min = 42 })
@@ -77,8 +102,8 @@ return function(e)
 
   local inv = game.create_inventory(1)
   inv[1].set_stack("blueprint")
-  inv[1].create_blueprint { surface = s, force = f, area = { { -1, -1 }, { 17, 3 } } }
+  inv[1].create_blueprint { surface = s, force = f, area = { { -1, -1 }, { 25, 3 } } }
   helpers.write_file("fsim/discover.txt", inv[1].export_stack(), false)
   local ok, err = pcall(function() return dec.get_control_behavior().input_networks end)
-  helpers.write_file("fsim/discover-log.txt", serpent.block({ in_nets = ok and err or tostring(err) }), false)
+  helpers.write_file("fsim/discover-log.txt", serpent.block({ in_nets = ok and err or tostring(err), qt = qok or tostring(qerr), qf = fok or tostring(ferr), qt_params = qt_params, q2 = q2ok or tostring(q2err), qt2_params = qt2_params }), false)
 end

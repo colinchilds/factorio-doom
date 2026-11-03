@@ -4,9 +4,10 @@ Read this first. [README.md](README.md) has tool usage and the table of measured
 
 ## Goal
 
-A playable Doom-style first-person shooter built entirely from **vanilla Factorio 2.1
-combinators** (no mods), shown on a lamp screen. Factorio 2.1 added decider else-outputs, which
-is what makes this look feasible now.
+A playable Doom-style first-person shooter built entirely from **Factorio 2.1 combinators** (no
+mods), shown on a lamp screen. Factorio 2.1 added decider else-outputs, which is what makes this
+look feasible now. **Space Age is required (user decision, 2026-11-02):** the screen packs six rows
+per network on the six signal qualities (architecture item 12).
 
 - **Not a port of real Doom.** A combinator CPU running Doom's code would be millions of times
   too slow. We design dedicated rendering hardware out of combinators instead: a Wolfenstein-
@@ -51,8 +52,15 @@ is what makes this look feasible now.
   import because `satellite` doesn't exist there, and `parameter-N` signals would make a
   blueprint parametrised.
 - **Lane budget:** 2,878 lanes in vanilla (1,439 signals × 2 qualities, measured in game; order
-  in `conformance/signal_order.json`). Space Age would add more, but the signal order file would
-  have to be regenerated with DLC enabled.
+  in `conformance/signal_order.json`). Space Age has six qualities per signal (normal, uncommon,
+  rare, epic, legendary, quality-unknown; 13,446 signals in `conformance/signal_order_dlc.json`,
+  `harness/run.py --signals --dlc`). fsim uses that order for any blueprint with a Space Age quality.
+- **Quality is a lane axis (Space Age, measured: `conformance/cases_dlc`):** Each arithmetic and
+  Each deciders keep qualities apart, lamps read a signal at a quality, and a selector in quality
+  transfer mode (static quality, destination Each) moves *every* input signal to one quality in one
+  tick (`Graph.requality` / `Graph.spread`), summing signals that differ only in quality. That is
+  the one cheap permutation: a vector copied onto other lanes. Quality filter keeps one quality
+  (quality-unknown ranks above legendary in comparisons).
 
 ## Renderer architecture
 
@@ -60,8 +68,8 @@ M3 (Freedoom-textured walls, floors and ceilings) is built and verified; see "Ra
 The original plan had one column unit (~20 combinators) per screen column. The built design is
 far smaller: **the whole ray march is vector ops with lanes = screen columns** (about 700
 combinators at any width), plus a fixed texture lookup block (2 × types × tex × tex/8 deciders,
-4,096 for 4 textures at 64) and 27 combinators per screen row for walls, plus about 55 per row
-for textured floors and ceilings (flat 16).
+4,096 for 4 textures at 64) and **one pipeline per chunk of six screen rows** (item 12), about 85
+combinators each (walls, flats, things) plus the weapon's.
 
 ```
 Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► split ─► texture ─► row pipelines ─► lamps
@@ -133,8 +141,7 @@ Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► sp
    - **Build parameters (user request):** `raycast.Shading`, flags `--gamma` (default 0.5),
      `--saturation` (1.25) and `--fog` (8) on `raycast.py` and `game.py`. `--gamma 1
      --saturation 1 --fog 4` gives the old colors.
-5. **Rows** (fixed, 27 combinators per row at tex 64, slots right to left from the screen,
-   skipping the substation lattice's columns):
+5. **Rows** (now per chunk of six rows, item 12; per row as written here before 2026-11-02):
    - `V = D / c_y` with `c_y = round(H * 2^14 / ((2y + 1 - H) * tex))`: 4 × (texel row − tex/2).
      The wall covers `|V| < 2 tex`, so there's no wall-height vector.
    - Mux: per word j, `Each(green) != 0 AND lo_j <= Each(red V) < hi_j` → copy the word bus. The
@@ -159,10 +166,10 @@ Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► sp
      the row's brightness (a constant, since the row's distance is). An absent flat lane reads 0,
      which is color 0, so zero words need no decider.
    - It starts from RAW delayed to land with the wall texel, so it adds no latency.
-   - **Layout:** a row's networks must stay within reach of each other in its strip of slots, so
-     the wall chain is interleaved into the end of the word deciders (`row_slots`, checked by
-     `check_row_reach`). The strip block below alternates sides so each side's networks stay
-     contiguous (with 82 slot columns it is only about 50 deep).
+   - **Per chunk now (item 12):** the flat's color comes from one decider per flat color (the
+     texel, gated by a vector of ones so an absent texel reads as color 0) times a brightness
+     vector, and a flat select (`V` out of the wall, bounded so killed pixels miss it) copies it,
+     two delays before the palette tick. The wall's texel path no longer needs the floor marker.
 
 7. **Things (M4 sprites, `demos/things.py`, 2026-11-01):** monsters and items at map positions
    (`THINGS`, up to 8), Freedoom frames on the walls' texel grid (STEX = 64 per tile) in a box of
@@ -223,7 +230,7 @@ Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► sp
    - **Checks:** `--verify` adds "status bar vs the composed bar": the reference (`Hud.image`)
      picks glyphs the way Doom's STlib_drawNum does, independently of the deciders.
 
-9. **Weapons (`demos/weapons.py`, 2026-11-02, user request):** seven Freedoom weapons (pistol,
+9. **Weapons (`demos/weapons.py`, 2026-11-02, user request; overlay reworked by item 12):** seven Freedoom weapons (pistol,
    shotgun, chaingun, rocket launcher, plasma rifle, BFG, fist; art in
    `assets/freedoom/weapons.json`), "next weapon" cycles them, and fire plays Doom's animation
    with its muzzle flash.
@@ -236,16 +243,15 @@ Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► sp
      96 below (16 tics, 27 ticks), switches, raises the new one. The ready frames are drawn at
      `DROPS` = 8 steps of 12 px: 56 more pictures (88 in all), only +22% deciders since a lowered
      gun covers few rows. (Measured: 4 steps +7%, 16 steps +51% with the busiest row 77.)
-   - **Overlay (`build_graph(..., weapon=...)`):** per (picture, view row) one decider (condition
-     `F = id`) outputs that row's pixels as exact colors on the weapon network. A **compositor**
-     per view row, next to the screen, outputs the weapon's lanes and the view's on the rest:
-     `Each(red) != 0 AND Each(green) >= -2^31` → copy red, else copy green (the green condition
-     makes it visit the view's lanes). So the weapon covers walls, flats and things alike, at one
-     more tick (raycaster 18). The view's network reaches the compositor through the weapon
-     deciders' green inputs (they nominally read it; their conditions don't), so the compiler
-     wires it through the weapon block; each row's deciders are spread over the block's slots.
-   - **Cost:** 469 / 1,184 / 2,347 overlay deciders plus one compositor per view row at 64×40 /
-     160×100 / 320×200; busiest row 51 (the block next to the screen is 51 slots wide).
+   - **Overlay (`build_graph(..., weapon=...)`, since item 12):** per (picture, chunk) two
+     deciders (condition `F = id`): a kill, adding KILL to the chunk's V on red (no wall mux or
+     flat select fires) and to the things' Vs on green (no thing texel), and the colors, onto the
+     chunk's output at the palette tick. No compositor, so no extra tick. (Before: per (picture,
+     row) one decider and a compositor per row, one tick more.) The kills also nominally read the
+     flat select's output on green (`Node.nominal`: wired, not evaluated), so that network runs
+     through the weapon block without relay poles.
+   - **Cost:** before item 12: 469 / 1,184 / 2,347 overlay deciders plus one compositor per view
+     row at 64×40 / 160×100 / 320×200.
    - **State (game):** W (weapon index, 0 = pistol), A (animation tick: 0 ready, 1..L firing,
      128.. lowering, 155 down, 192.. raising) and D (switches queued) live on the state bus, REG's
      red output network, held by deciders that read the bus and write back onto it
@@ -295,7 +301,93 @@ Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► sp
      the evaluated bus and REG every tick; the scripted walk takes an unarmored hit, picks up the
      armor, takes an armored hit, then the ammo box and the medikit.
 
-Still to come (M4): enemies, shooting, doors; see "Next steps".
+11. **Shooting (`demos/combat.py`, 2026-11-02, user request):** hitscan along the middle of the
+    view kills monsters, with Freedoom's pain and death frames on Doom's timing.
+   - **Aim (raycaster side, `combat.aim_stage`, the `aim` hook of `build_graph`):** it already has
+     every thing's depth alpha and lateral offset L (`column_stage` returns them) and the wall
+     distance per column. `DC` = the middle column's D × 8 (alpha's scale); per live monster
+     A_i = alpha_i if |L_i| < HIT_R (24 Doom units), 0 < alpha_i < DC, else BIG (an else-output);
+     then B_i: A_i the smallest (ties to the lower index) → `AIM = i + 1`, and with alpha_i < MELEE
+     also `CLOSE = 1`. Corpses don't block shots, items never do.
+   - **B's outputs are wired to the camera port** (the port ext node lists them as red inputs, so
+     the compiler wires them to it): the port is the state bus, so AIM and CLOSE land on the bus,
+     τ = 14 ticks behind REG (newer than the frame on screen, 18). No raycaster latency.
+   - **Monster state (bus, per thing index):** `DMG_i` (damage taken, held) and `MS_i` (animation
+     clock: 0 standing, 1..PL pain, DEATH = 64.. dying, CORPSE held). At a weapon's shot ticks
+     (the spend deciders' A values and ammo checks) with AIM = i + 1 (and CLOSE for the fist) and
+     alive → DMG_i += Doom's mean damage (pistol 10, shotgun 70 (all pellets), chaingun 10,
+     rocket 100, plasma 22, BFG 450, fist 11; no randomness). Pain starts only from standing on a
+     hit that doesn't kill; death starts the tick after DMG reaches the health (imp 60, zombieman
+     20). Signals: DMG = `signal-red`..`grey`, MS = punctuation signals, AIM `signal-I`, CLOSE
+     `signal-M`.
+   - **Frames:** the raycaster adds a lookup on MS_i (from the port) to the standing frame's id,
+     broadcast onto the dleaf's green input (`column_stage` `frame` hook); `combat.frames` adds the
+     pain/death frames to `things.load`. The dying imp's box is wider (32 texels), so Zt drops one
+     depth bit (`qd`) to keep a hidden item's key in range.
+   - **Dead monsters** stop hurting (touch's pain start) and stop being solid (the corner deciders
+     test DMG < health; the reference feeds them the bus, not just REG).
+   - **Fist reach is a tile:** Doom's is 84 units to the centre, but our monster boxes carry the
+     latency allowance and stop the player 0.53–0.69 tile away per axis.
+   - **Cost:** about 25 aim combinators in the raycaster, 37 bus deciders for 4 monsters, ~250
+     more thing lookups (14 more frames). The bus writers now snake in columns after the spend
+     deciders; their chain joins the bus through one writer's own input (it reads the bus).
+   - **Checks:** `combat.step` (plain Python) against the bus every tick; the aim against a float
+     hitscan (`combat.ideal_aim`: DDA along the middle column's ray, as the circuit) from the bus τ earlier, skipping near-ties (corner grazes,
+     within 0.02 tile). The scripted fight (`game.COMBAT_SCRIPT`, ticks 700–1340): shotgun the
+     zombieman (dies), chaingun the imp (four bullets, two pain flinches), switch to the fist while
+     walking up to it, two punches (dies).
+
+12. **Chunks, layout and latency (2026-11-02, user request: "the layout is abysmal", fewer
+    combinators, keep latency):**
+   - **Six screen rows per network.** Row q of a chunk is quality q of its column's lane signal
+     (`QUALITY_LANES`, `q_signal`, `DEFAULT_ROWS` 6; one row per network no longer lays out: its
+     blocks are one row tall, with no room for relay poles). Chunks never straddle
+     the horizon (floor and ceiling flats differ) or the status bar. Per-row constants (c_y, the
+     flat's K_y and brightness, the things' cs_y, the background) become constant vectors over the
+     chunk's lanes, and every row op a vector op (`vv` with the constant on green).
+   - **Spreads:** per-column vectors the chunks read (D, the 8 word buses, the 14 color products,
+     RAW, the things' Dt, mask and word buses, thing visibility) are copied onto every quality by
+     six quality transfers each (`bus()` in `build_graph`; about 190 selectors), one tick. The
+     weapon's kill (item 9) saves the compositor's tick, so the raycaster stays at 18, and the
+     angle wrap (below) makes it 17.
+   - **Count:** 160×100 game 8,724 combinators (16,764 before), raycaster 7,624 (14,165);
+     64×40 7,648. Relay poles at 160×100: game about 520 (2,694 before), raycaster 403 (about
+     1,000). Blueprint strings grow (every lane signal names its quality, and each chunk has a few
+     constant vectors): 160×100 1.7 MB (1.4), 320×200 5.9 MB (3.7).
+   - **Pad** right beside the screen (x = w + 2; the user zooms in on the lamps); the bus row ends
+     in a substation in the 2-tile gap. `link_power` bridges a copper link longer than the reach
+     with a substation in between (the pad can take a lattice spot).
+   - **Layout by concept** (`place_chunks`): chunk blocks left of the screen, each k rows tall at
+     y = k m, the same (column, row) per role in every chunk (`ROLE_GROUPS`: flats, weapon kills,
+     wall and thing paths, palettes, weapon colors; a free column between groups for relay poles),
+     so each bus runs straight down one column; status bar chunks below; the spreads and per-color
+     products just above (`area`, the free spot nearest their consumers, empty role slots
+     included); the texture and sprite lookup block above them; the march as a grid left of it
+     (`place_march`: per side a row per step, its ops in `MARCH_COLS`, then the min trees between
+     their inputs, the split and the texture keys); the rest (camera lookups, things, aim, status
+     values) placed by the compiler left of that, its stacks now centered on their consumers
+     (isotonic regression) instead of piling downward. Compiler copies (`dup`) go next to their
+     original. Row blocks for things and the camera were tried and cost more poles (fan-out).
+   - **The state bus rides a substation row:** substations on the lattice row through the top of
+     the screen (y = offset), chained by red wire from right of the screen (REG, through relay
+     poles) to the camera port left of the column stage; the port ext lists the rest as `taps`, so
+     every bus reader wires to its nearest one (`_mst(joined=...)`). No big-pole line.
+   - **Angle wrap (latency, the "bounded angle" option below):** two deciders next to REG
+     (`angle_wrap`) add ∓1024 to R when R + their own output (green loop) leaves [0, 1024), so a
+     correction fires once; R stays in `angle_range(turn)` (two ticks of the fastest turn either
+     side) and the camera, things and step lookups key on R directly (the `& 1023` and `>> 2` in
+     the tables). The position's `+ SPAWN` rides on its consumers' wire after the `| 1` (SPAWN is
+     even). Raycaster 17 ticks from the port, the movement path 1 tick behind REG (box 78).
+   - **Checks:** raycast and game `--verify` at 64×40, 160×100 and 320×200: every frame matches
+     the evaluation; the scripted fight got a turn tap before the punches (the smaller box changed
+     the walk). The 64×40 game matches a Space Age game on 13,682,223 checks (1,340 ticks,
+     `harness/run.py --dlc --warmup 60`, about 13 minutes, a 5 GB dump). 320×200: 10,736
+     combinators (26,819 before), 1.14 ms per tick in Space Age (1.97 before); 160×100 0.58 ms
+     (300-tick medians, `harness/run.py --dlc --bench 300`). A constant combinator section holds at most 1,000 filters: a 320-wide
+     chunk's constants (1,920 lanes) failed to import until `Blueprint.constant` split them into
+     sections.
+
+Still to come (M4): enemies, doors; see "Next steps".
 
 Earlier notes that still hold:
 
@@ -413,7 +505,11 @@ The game is the referee, and fsim is the fast development loop:
    - `conform.rs`: maps game dump rows onto simulation ticks.
 
    `run` prints a warning for every wire the game would drop (before 2026-11-01 these were
-   computed but never printed). `FSIM_SHOW=N fsim conform` shows more than 12 mismatches.
+   computed but never printed), including red-to-green wires. `FSIM_SHOW=N fsim conform` shows
+   more than 12 mismatches. Space Age (2026-11-02): selector quality transfer (static, to Each)
+   and quality filter, pole wire reach by entity quality (`pole_quality.json`), and the Space Age
+   signal order for blueprints using its qualities; `conformance/cases_dlc` (`quality_ops`,
+   `substation_reach`) with `conformance/game_dump_dlc.json` is a cargo test.
 
    Speed: about 16 µs per tick for 328 entities, 2.7 ms at 160×100 and 11 ms at 320×200 for the
    M0 pixel stage. Lookup deciders are about 100× slower than in the game (10 ns per lane ×
@@ -616,20 +712,25 @@ right, then the player logic below the pad.
     can't cut corners (checking only the center line once let diagonal moves cut in).
 - **Startup:** a gate needs a held button, so a pipeline that's still filling adds nothing.
   (The previous design needed offset values and `Each - C1` for this.)
-- **Camera path:** REG reaches the raycaster's camera port (a pole left of the screen, the
-  raycaster graph's ext input) over a big-pole line above the screen.
+- **Camera path:** REG reaches the raycaster's camera port over the substation row through the
+  top of the screen (item 12; a big-pole line above the screen before 2026-11-02).
   `raycast.build_graph(w, h, camera)` takes the camera from the caller; M1's script is
   `scripted_camera`.
 - **Checks (with M3 textures):**
   - `--verify`: REG matches the reference on every tick, the player box never touches a wall or a monster's box,
     and sampled frames match the raycaster evaluation, at 64×40, 160×100 and 320×200.
-  - The 64×40 build (normal substations) matches the game on 8,569,024 checks with thing contact
+  - The 64×40 build (normal substations) matches the game on 17,255,163 checks with shooting
+    (1,300 ticks: the zombieman shotgunned, the imp chaingunned with two pain flinches and punched
+    to death, both corpses; about 14 minutes and a 4 GB dump; 2026-11-02). Before that it matched
+    on 8,569,024 checks with thing contact
     (two monster hits, armor, ammo and medikit pickups, the turn ramp; 2026-11-02) and the weapons
     (every weapon switched to, raise/lower, queued taps, most fired, `harness/run.py --warmup 60`, scripted inserts, 700
     ticks; about 7 minutes and a 2 GB dump; almost all of it is the mod recording every entity,
     not the game). Before thing contact it matched on 8,545,891. With the status bar alone it matched on 4,627,941
     (400 ticks). Before the HUD it matched on 4,706,537 with things. With flats only it matched on 4,263,031, without flats on 3,367,999, and M2 on 1,209,416.
-  - With thing contact, 320×200 imports in Space Age fully powered (94,343 entities, 25,780
+  - With shooting, 320×200 imports in Space Age fully powered (95,460 entities, 26,819
+    combinators) at 1.97 ms per tick; 160×100 is 16,764 combinators.
+  - With thing contact, 320×200 imported in Space Age fully powered (94,343 entities, 25,780
     combinators) at 2.53 and 3.23 ms per tick in two runs, noisy (the machine had just run heavy
     jobs; contact adds about 40 one-lane deciders). With the weapons alone 2.09 ms (94,278
     entities, 25,747 combinators; network update 1.03 ms of it). With the status bar alone 1.72 ms
@@ -637,14 +738,14 @@ right, then the player logic below the pad.
   - 160×100 imports in Space Age, fully powered, at 0.87 ms per tick with things (0.78 without;
     without flats 0.59; M2 0.40). 320×200: 1.75 ms with things (1.40 without, 1.16 without
     flats, M2 0.88). Blueprint strings 1.0 and 2.6 MB.
-- **Input-to-screen latency:** about 23 ticks (0.38 s) for both turning and walking: pad 3,
-  gate or turn decider into REG 2, raycaster 18 with the lamps (22 before the weapon's
-  compositor). Firing: pad 3, relay 1, the animation's start 1, then the raycaster.
+- **Input-to-screen latency:** about 22 ticks (0.37 s) for both turning and walking: pad 3,
+  gate or turn decider into REG 2, raycaster 17 with the lamps (18 before the angle wrap, item
+  12). Firing: pad 3, relay 1, the animation's start 1, then the raycaster.
   - **History:** about 56 ticks at first (the user felt "almost a full second"), then 27 for
     turning and 35 for walking, then 21 (M2, flat walls), then this.
-  - **The raycaster's 17:** angle 1, camera lookups 1, ray products 1, ray shift / sign
-    selectors 1, key product 1, key division 1, hit lookup 1, min trees 4, side split 1, strip
-    lookups (and V) 1, mux 1, shift 1, palette 1, compositor 1 (weapon), lamps 1.
+  - **The raycaster's 17:** camera lookups 1, ray products 1, ray shift / sign selectors 1, key
+    product 1, key division 1, hit lookup 1, min trees 4, side split 1, strip lookups 1, quality
+    spread (and V's spread) 1, V 1, mux 1, shift 1, palette 1, lamps 1.
 - **Further cuts if we want them (not done; option B, discussed 2026-11-01):**
   - **Angle ROM:** everything that depends only on view angle and column (ray components, the
     per-step slopes and distance steps, the sign selections) precomputed for all 256 angles in
@@ -661,9 +762,7 @@ right, then the player logic below the pad.
       FR` on lanes going −) removes the sign-dependent constant vectors.
     - With M3 the march also feeds the key tree: its leaves (the per-step key) would come from
       the ROM the same way.
-  - **Bounded angle:** a wrap decider keeping R in about [-4, 259] (reading REG plus its own
-    output, so it fires once) would let lookups key on R directly with the `& 255` folded into
-    the tables: 1 tick off the raycaster and off the step lookups (box 78).
+  - **Bounded angle:** done (item 12, `angle_wrap`).
 
 ## Status (2026-11-01)
 
@@ -687,18 +786,23 @@ Done:
 - M4 weapons (architecture item 9): seven weapons in front of the view, switching, Doom's firing
   animations and ammo use.
 - M4 thing contact (architecture item 10): pickups, monster pain, solid monsters; the turn ramp.
+- M4 shooting (architecture item 11): hitscan, monster health, pain and death animations, corpses.
+- Chunks, layout and latency (architecture item 12): six rows per network on signal qualities
+  (Space Age), about half the combinators, layout by concept, the bus on a substation row, 17-tick
+  raycaster.
 
 Commit only when the user asks.
 
 ## Next steps (in order)
 
-1. **M4, the rest:** things are drawn (item 7); next are enemies (positions and frames from a
-   state register instead of constants: `column_stage` takes scalars, and the box per sprite type
-   already fits every frame), shooting (hitscan on the center column: the nearest thing there is
-   on `Zt`/`Dt`), doors. M5 (stretch): angled walls, varying heights.
+1. **M4, the rest:** things are drawn (item 7) and can be shot (item 11); next are enemies
+   (positions from a state register instead of constants: alpha/L from scalars per thing, walk and
+   attack frames through the same frame lookup as pain and death), doors.
+   - Shooting follow-ups: Doom's randomness (damage rolls, pain chance), shotgun spread, rocket
+     splash, bullet puffs, more than 8 things. M5 (stretch): angled walls, varying heights.
    - HUD follow-ups: the face looking left/right and its pain/ouch frames, keys, owned weapons
      in the ARMS panel once there are pickups; all are more slots of the same kind.
-   - Weapon follow-ups: hitscan reads W and the shot ticks (spend deciders' conditions);
+   - Weapon follow-ups:
      pickups (weapons owned, ammo); the walking bob (it moves sideways too: about 10× the
      pictures, or a different way to draw the gun); Doom's muzzle light (A_Light1 brightens the view: a brightness term on
      the bus); the chainsaw and super shotgun.

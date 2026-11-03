@@ -3,7 +3,7 @@
 Specs are the blueprint control-behavior dicts themselves (arithmetic_conditions /
 decider_conditions), so what gets evaluated is exactly what gets built. The rules follow the
 verified table in README.md; anything not covered there raises instead of guessing.
-Signal values are dicts {(type, name): int}; absent means 0.
+Signal values are dicts {(type, name, quality): int}; absent means 0.
 """
 
 EACH, EVERYTHING, ANYTHING = "signal-each", "signal-everything", "signal-anything"
@@ -15,7 +15,10 @@ def i32(x):
 
 
 def key(s):
-    return (s.get("type", "item"), s["name"])
+    return (s.get("type", "item"), s["name"], s.get("quality", "normal"))
+
+
+QUALITY_LEVEL = {"normal": 0, "uncommon": 1, "rare": 2, "epic": 3, "legendary": 5, "quality-unknown": 6}
 
 
 def add_into(acc, d):
@@ -115,9 +118,34 @@ CMP = {"<": lambda a, b: a < b, ">": lambda a, b: a > b, "=": lambda a, b: a == 
        "≤": lambda a, b: a <= b, ">=": lambda a, b: a >= b, "≥": lambda a, b: a >= b}
 
 
+def quality_transfer(quality):
+    """Selector spec: every input signal re-tagged at `quality` (Space Age; conformance quality_ops)."""
+    return {"operation": "quality-transfer", "quality_source_static": {"name": quality},
+            "quality_destination_signal": {"type": "virtual", "name": EACH}}
+
+
+def _selector(spec, red, green):
+    net = _net(red, green, None)
+    op = spec["operation"]
+    if op == "quality-transfer" and spec["quality_destination_signal"]["name"] == EACH \
+            and not spec.get("select_quality_from_signal"):
+        q = spec.get("quality_source_static", {}).get("name", "normal")
+        res = {}
+        for (t, n, _), v in net.items():
+            add_into(res, {(t, n, q): v})
+        return res
+    if op == "quality-filter":
+        f = spec["quality_filter"]
+        cmp, lq = CMP[f.get("comparator", "=")], QUALITY_LEVEL[f["quality"]]
+        return {k: v for k, v in net.items() if cmp(QUALITY_LEVEL[k[2]], lq)}
+    raise NotImplementedError(op)
+
+
 def evaluate(kind, spec, red, green, cache=None):
     """cache: a dict shared by one evaluation pass in which input dicts are never mutated (keyed
     by their ids), so merged networks and value indexes are computed once."""
+    if kind == "selector":
+        return _selector(spec, red, green)
     return _arith(spec, red, green) if kind == "arith" else _decider(spec, red, green, cache)
 
 

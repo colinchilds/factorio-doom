@@ -8,6 +8,8 @@ use std::collections::HashMap;
 
 /// The game's signal order for vanilla 2.1 (base mod, normal + quality-unknown).
 const VANILLA_ORDER: &str = include_str!("../../../conformance/signal_order.json");
+/// The same with Space Age (space-age, quality, elevated-rails): six qualities per signal.
+const DLC_ORDER: &str = include_str!("../../../conformance/signal_order_dlc.json");
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SignalKey {
@@ -43,7 +45,15 @@ pub struct SignalTable {
 
 impl SignalTable {
     pub fn vanilla() -> Self {
-        let list: Vec<Vec<String>> = serde_json::from_str(VANILLA_ORDER).expect("signal_order.json");
+        Self::from_order(VANILLA_ORDER)
+    }
+
+    pub fn dlc() -> Self {
+        Self::from_order(DLC_ORDER)
+    }
+
+    fn from_order(order: &str) -> Self {
+        let list: Vec<Vec<String>> = serde_json::from_str(order).expect("signal order");
         let mut t = SignalTable { keys: Vec::new(), index: HashMap::new(), known: 0 };
         for k in list {
             t.intern(SignalKey::new(&k[0], &k[1], &k[2]));
@@ -80,6 +90,20 @@ impl SignalTable {
 
     pub fn format(&self, v: &SigVec) -> String {
         v.iter().map(|&(id, c)| format!("{}={}", self.key(id).short(), c)).collect::<Vec<_>>().join(" ")
+    }
+}
+
+/// Quality level (Space Age): normal 0 .. legendary 5. quality-unknown passes a `>= rare` quality
+/// filter in game (`quality_ops`), so it ranks above legendary here.
+pub fn quality_level(q: &str) -> Option<i32> {
+    match q {
+        "normal" => Some(0),
+        "uncommon" => Some(1),
+        "rare" => Some(2),
+        "epic" => Some(3),
+        "legendary" => Some(5),
+        "quality-unknown" => Some(6),
+        _ => None,
     }
 }
 

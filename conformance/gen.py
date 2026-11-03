@@ -10,15 +10,16 @@ Run: python3 conformance/gen.py
 import json
 import pathlib
 
-from bp import (ANYTHING, EACH, EVERYTHING, GREEN, GREEN_IN, GREEN_OUT, INT_MAX, INT_MIN, LETTERS,
+from bp import (ANYTHING, EACH, EVERYTHING, GREEN, GREEN_IN, GREEN_OUT, INT_MAX, INT_MIN, LETTERS, QUALITY_LANES,
                 RED, RED_IN, RED_OUT, Blueprint, cond, nets, out, sig)
 
 CASES = {}
+DLC_CASES = {}   # need Space Age (quality): conformance/cases_dlc, run with harness/run.py --dlc
 
 
-def case(ticks):
+def case(ticks, dlc=False):
     def register(fn):
-        CASES[fn.__name__] = (fn, ticks)
+        (DLC_CASES if dlc else CASES)[fn.__name__] = (fn, ticks)
         return fn
     return register
 
@@ -409,19 +410,81 @@ def chest_read(b):
     ]}
 
 
-def main():
-    root = pathlib.Path(__file__).parent / "cases"
+# -- Space Age (quality) ---------------------------------------------------------------------------
+
+@case(6, dlc=True)
+def quality_ops(b):
+    """Quality as a lane axis. Selector quality transfer (static quality, destination Each) re-tags
+    every input at one quality, summing signals that differ only in quality; to every quality,
+    quality-unknown included. Quality filter keeps one quality (=, != and a level comparison).
+    Each arithmetic and Each deciders keep qualities apart; a lamp reads a signal at a quality."""
+    vals = [(sig("iron-plate", "item"), 5), (sig("iron-plate", "item", "uncommon"), 7), (sig("signal-A"), 100),
+            (sig("copper-plate", "item", "quality-unknown"), 3), (sig("signal-R"), 0xFF2000),
+            (sig("copper-plate", "item", "legendary"), 11), (sig("copper-plate", "item", "rare"), 1000),
+            (sig("signal-R", quality="epic"), 0x00FF40), (sig("signal-B", quality="uncommon"), -9)]
+    c = b.constant(0, 0, vals)
+    prev = c
+    for i, q in enumerate(QUALITY_LANES):
+        s = b.selector(1 + 2 * i, 0, operation="quality-transfer", quality_source_static={"name": q},
+                       quality_destination_signal=EACH)
+        b.wire(prev, 1 if prev == c else RED_IN, s, RED_IN)
+        prev = s
+    for i, (q, cmp) in enumerate([("uncommon", "="), ("rare", "!="), ("rare", ">="), ("quality-unknown", "=")]):
+        s = b.selector(1 + 2 * i, 3, operation="quality-filter", quality_filter={"quality": q, "comparator": cmp})
+        b.wire(c, 1, s, RED_IN) if i == 0 else b.wire(prev2, RED_IN, s, RED_IN)
+        prev2 = s
+    a = b.arithmetic(9, 3, EACH, "*", 2, EACH)
+    b.wire(prev2, RED_IN, a, RED_IN)
+    t = b.selector(11, 3, operation="quality-transfer", quality_source_static={"name": "epic"}, quality_destination_signal=EACH)
+    b.wire(a, RED_IN, t, RED_IN)
+    d = b.decider(13, 3, [cond(EACH, ">", 6)], [out(EACH)], [out(EACH, constant=1)])
+    b.wire(t, RED_OUT, d, RED_IN)
+    e = b.decider(15, 3, [cond(EACH, "<", EACH, RED, GREEN)], [out(EACH, networks=RED)], [out(EACH, networks=GREEN)])
+    b.wire(t, RED_OUT, e, RED_IN)
+    b.wire(d, GREEN_OUT, e, GREEN_IN)
+    for i, q in enumerate(["normal", "epic", "rare"]):
+        lamp = b.lamp(13 + i, 0, {"use_colors": True, "color_mode": 2, "rgb_signal": sig("signal-R", quality=q)},
+                      always_on=True)
+        b.wire(c, 1, lamp, 1) if i == 0 else b.wire(prev3, 1, lamp, 1)
+        prev3 = lamp
+    b.wire(prev, RED_OUT, prev3, 1)   # the last transfer (quality-unknown) and the constant: rare R stays dark
+
+
+@case(4, dlc=True)
+def substation_reach(b):
+    """Legendary substations carry circuit wires 28 tiles center to center (their reach); 29 is
+    too far and the game drops the wire."""
+    c = b.constant(0, 0, {"signal-A": 3})
+    s1 = b._add("substation", 2, 1, quality="legendary")
+    s2 = b._add("substation", 30, 1, quality="legendary")
+    s3 = b._add("substation", 30, 30, quality="legendary")
+    a1 = b.arithmetic(32, 0, EACH, "+", 0, EACH)
+    a2 = b.arithmetic(32, 29, EACH, "+", 0, EACH)
+    b.wire(c, 1, s1, 1)
+    b.wire(s1, 1, s2, 1)
+    b.wire(s2, 1, s3, 1)
+    b.wire(s2, 1, a1, RED_IN)
+    b.wire(s3, 1, a2, RED_IN)
+
+
+def write(root, cases, quality="normal"):
     root.mkdir(exist_ok=True)
     for old in root.glob("*.json"):
         old.unlink()
-    for name, (fn, ticks) in CASES.items():
-        b = Blueprint(name)
+    for name, (fn, ticks) in cases.items():
+        b = Blueprint(name, quality)
         extra = fn(b) or {}
         b.power()
         data = b.to_json()
         data["fsim"] = {"ticks": ticks, "doc": (fn.__doc__ or "").strip(), **extra}
         (root / f"{name}.json").write_text(json.dumps(data, indent=1))
         print(f"{name}: {len(b.entities)} entities, {ticks} ticks")
+
+
+def main():
+    here = pathlib.Path(__file__).parent
+    write(here / "cases", CASES)
+    write(here / "cases_dlc", DLC_CASES, "legendary")
 
 
 if __name__ == "__main__":

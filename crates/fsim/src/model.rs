@@ -126,6 +126,12 @@ pub enum Selector {
     Select { max: bool, index: Operand, cmp: Cmp },
     Count(Option<u32>),
     Time { game_tick: Option<u32> },
+    /// Quality transfer with a static quality and destination Each: every input signal is output at
+    /// that quality (signals that differ only in quality add up). `map[id]` is the id at the
+    /// target quality (filled in after parsing, when every signal id is known).
+    QualityTransfer { quality: String, map: Vec<u32> },
+    /// Quality filter: only the input signals whose quality passes (`keep[id]`).
+    QualityFilter { quality: String, cmp: Cmp, keep: Vec<bool> },
     Unsupported(String),
 }
 
@@ -170,6 +176,8 @@ pub struct Entity {
     pub y: f64,
     /// 16-way direction (0 north, 4 east, 8 south, 12 west).
     pub direction: u32,
+    /// Entity quality ("normal" unless the blueprint says otherwise): pole wire reach depends on it.
+    pub quality: String,
     pub behavior: Behavior,
 }
 
@@ -238,10 +246,58 @@ const PASSIVE: &[&str] = &[
 pub fn parse(root: &Value) -> Result<Model> {
     let meta = root.get("fsim").cloned().unwrap_or(Value::Null);
     let bp = root.get("blueprint").ok_or_else(|| anyhow!("not a single blueprint (no 'blueprint' key)"))?;
-    let mut p = Parser { signals: SignalTable::vanilla(), warnings: Vec::new() };
+    // A blueprint using Space Age qualities (signals or entities) runs with Space Age's signal order.
+    let signals = if uses_dlc_quality(bp) { SignalTable::dlc() } else { SignalTable::vanilla() };
+    let mut p = Parser { signals, warnings: Vec::new() };
     let mut entities = Vec::new();
     for e in bp.get("entities").and_then(Value::as_array).into_iter().flatten() {
         entities.push(p.entity(e)?);
+    }
+    // Quality selectors need every signal id at every quality: intern them all, then fill in the
+    // tables (signals interned later, by scripted inserts, pass through unchanged).
+    let qsel: Vec<String> = entities
+        .iter()
+        .filter_map(|e| match &e.behavior {
+            Behavior::Selector(Selector::QualityTransfer { quality, .. }) => Some(quality.clone()),
+            _ => None,
+        })
+        .collect();
+    if entities.iter().any(|e| matches!(e.behavior, Behavior::Selector(Selector::QualityTransfer { .. } | Selector::QualityFilter { .. }))) {
+        let n0 = p.signals.len() as u32;
+        for id in 0..n0 {
+            let k = p.signals.key(id).clone();
+            for q in &qsel {
+                p.signals.intern(crate::signals::SignalKey::new(&k.ty, &k.name, q));
+            }
+        }
+        let n = p.signals.len() as u32;
+        for e in entities.iter_mut() {
+            match &mut e.behavior {
+                Behavior::Selector(Selector::QualityTransfer { quality, map }) => {
+                    *map = (0..n)
+                        .map(|id| {
+                            let k = p.signals.key(id).clone();
+                            p.signals.find(&crate::signals::SignalKey::new(&k.ty, &k.name, quality)).unwrap()
+                        })
+                        .collect();
+                }
+                Behavior::Selector(Selector::QualityFilter { quality, cmp, keep }) => {
+                    let lq = crate::signals::quality_level(quality);
+                    *keep = (0..n)
+                        .map(|id| {
+                            let k = p.signals.key(id);
+                            match (*cmp, crate::signals::quality_level(&k.quality), lq) {
+                                (Cmp::Eq, _, _) => k.quality == *quality,
+                                (Cmp::Ne, _, _) => k.quality != *quality,
+                                (c, Some(a), Some(b)) => c.holds(a, b),
+                                _ => false,
+                            }
+                        })
+                        .collect();
+                }
+                _ => {}
+            }
+        }
     }
     let mut wires = Vec::new();
     for w in bp.get("wires").and_then(Value::as_array).into_iter().flatten() {
@@ -259,6 +315,16 @@ pub fn parse(root: &Value) -> Result<Model> {
         warnings: p.warnings,
         meta,
     })
+}
+
+fn uses_dlc_quality(v: &Value) -> bool {
+    match v {
+        Value::Object(m) => m.iter().any(|(k, x)| {
+            (k == "quality" && matches!(x.as_str(), Some("uncommon" | "rare" | "epic" | "legendary"))) || uses_dlc_quality(x)
+        }),
+        Value::Array(a) => a.iter().any(uses_dlc_quality),
+        _ => false,
+    }
 }
 
 struct Parser {
@@ -296,6 +362,13 @@ impl Parser {
         let key = SignalKey::new(ty, name, quality);
         let id = match self.signals.find(&key) {
             Some(id) => id,
+            // A known signal at a Space Age quality (the table is vanilla's: normal and
+            // quality-unknown): fine, it just gets an id after the known ones.
+            None if crate::signals::quality_level(quality).is_some()
+                && self.signals.find(&SignalKey::new(ty, name, "normal")).is_some() =>
+            {
+                self.signals.intern(key)
+            }
             None => {
                 self.warnings.push(format!("signal {} is not in the game's signal list", key.short()));
                 self.signals.intern(key)
@@ -349,7 +422,8 @@ impl Parser {
         let cb = e.get("control_behavior").unwrap_or(&null);
         let direction = e.get("direction").and_then(Value::as_u64).unwrap_or(0) as u32;
         let behavior = self.behavior(&name, cb).with_context(|| format!("entity {number} ({name})"))?;
-        Ok(Entity { number, name, x, y, direction, behavior })
+        let quality = e.get("quality").and_then(Value::as_str).unwrap_or("normal").to_string();
+        Ok(Entity { number, name, x, y, direction, quality, behavior })
     }
 
     fn behavior(&mut self, name: &str, cb: &Value) -> Result<Behavior> {
@@ -434,6 +508,19 @@ impl Parser {
                             }
                         }
                         Selector::Time { game_tick: sig(self, "game_tick_signal")? }
+                    }
+                    "quality-transfer"
+                        if cb.get("select_quality_from_signal").and_then(Value::as_bool) != Some(true)
+                            && cb.pointer("/quality_destination_signal/name").and_then(Value::as_str) == Some("signal-each") =>
+                    {
+                        let q = cb.pointer("/quality_source_static/name").and_then(Value::as_str).unwrap_or("normal");
+                        Selector::QualityTransfer { quality: q.to_string(), map: Vec::new() }
+                    }
+                    "quality-filter" => {
+                        let f = cb.get("quality_filter").unwrap_or(&Value::Null);
+                        let q = f.get("quality").and_then(Value::as_str).unwrap_or("normal");
+                        let cmp = Cmp::parse(Some(f.get("comparator").and_then(Value::as_str).unwrap_or("=")))?;
+                        Selector::QualityFilter { quality: q.to_string(), cmp, keep: Vec::new() }
                     }
                     other => {
                         self.warnings.push(format!("selector operation {other:?} is not simulated (outputs nothing)"));

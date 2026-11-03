@@ -53,8 +53,9 @@ ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "conformance"))
 sys.path.insert(0, str(HERE))
-from bp import DEFAULT_SUBSTATION_QUALITY, Blueprint, encode, quality_arg  # noqa: E402
+from bp import DEFAULT_SUBSTATION_QUALITY, QUALITY_LANES, Blueprint, encode, quality_arg  # noqa: E402
 from compiler import semantics as sem  # noqa: E402
+from compiler import netlist as nl  # noqa: E402
 from compiler.netlist import EACH, GREEN, LANE_SIGNALS, RED, Collect, Graph, Node, Scalar  # noqa: E402
 from sprite import DEFAULT_GAMMA, DEFAULT_SATURATION, c4 as to_c4, grade, nearest, quantize  # noqa: E402
 import hud as hd  # noqa: E402
@@ -95,6 +96,7 @@ DEFAULT_TEX = 64             # texture resolution (texels per tile, both ways)
 FLAT_OF = {"floor": "FLOOR4_8", "ceiling": "TLITE6_4"}   # Freedoom flats, one per tile
 FLAT_COLORS = 16             # flat texels 0..15
 DEFAULT_FLAT = 16            # flat resolution (texels per tile, both ways); 0 = untextured
+DEFAULT_ROWS = 6             # screen rows per network: the qualities of a lane signal (Space Age)
 
 
 def pack(rgb):
@@ -315,7 +317,8 @@ def row_scale(y, h, shade, proj=None):
 
 
 def flat_color(c4, br):
-    return (pack(c4) * br) or 1
+    """A flat texel's color at brightness br (never 0: a lamp reading 0 shows its default color)."""
+    return (pack(c4) or 1) * max(1, br)
 
 
 def scripted_hud(g, extra):
@@ -369,43 +372,178 @@ def slot_columns(n, hole, x_right=-2):
     return xs
 
 
-def row_slots(nw, words, flats, tcolors=0):
-    """Slot names of a row pipeline, left to right. Each row-local network (below) must have its
-    members within wire reach of each other, so the wall chain is interleaved into the end of
-    the flat word deciders. tcolors: thing colors (0 = no things); things add a kill path before
-    V and a texel path between the palettes and the screen."""
-    mux = [f"mux{j}" for j in range(nw)]
-    pals = [f"pal{c}" for c in range(1, COLORS + 1)]
-    kill = th.slots_kill() if tcolors else []
-    if tcolors:
-        pals = th.palette_run(pals, tcolors)
-    if not flats:
-        return kill + ["v", "bg"] + mux + ["S", "shift", "pal15"] + pals
-    pre, a = kill + ["v", "bg"] + mux[:-1], words[:-1]
-    k = min(len(pre), len(a))
-    mid = a[:len(a) - k] + pre[:len(pre) - k] + [x for pair in zip(a[len(a) - k:], pre[len(pre) - k:]) for x in pair]
-    return (["px", "py", "fx", "fy"] + mid + [words[-1], "sf1", "wd", mux[-1], "sf", "S", "tf", "shift"]
-            + [f"fpal{c}" for c in range(FLAT_COLORS)] + pals)
+ROLE_GROUPS = [   # a chunk's columns, left to right toward the screen (prefix, ...); k...: its constants
+    ("kky", "fxp", "fyp", "fx", "fy", "w", "fu", "fs", "wd", "tf", "kones", "fpal", "kbr", "fc", "kbg", "sel"),
+    ("wk",),
+    ("kcy", "v", "s", "mux", "e1", "kcsq", "tq", "tp", "tom", "kill", "kcs", "tv", "tnib", "tmux", "tt", "t"),
+    ("e2", "pal"),
+    ("wc",),
+]
 
 
-def row_nets(nw, words, flats, tcolors=0):
-    """Networks within one row (lists of slot names) for the reach check."""
-    mux = [f"mux{j}" for j in range(nw)]
-    pals = [f"pal{c}" for c in range(1, COLORS + 1)] + (["pal15"] if not flats else [])
-    fpals = [f"fpal{c}" for c in range(FLAT_COLORS)] if flats else []
-    tpals = [f"spal{c}" for c in range(1, tcolors + 1)]
-    nets = [["v", "bg"] + mux + ["S"], mux + ["bg", "shift"], ["S", "shift"], ["shift"] + fpals + pals,
-            fpals + pals + tpals]
-    if flats:
-        nets += [["px", "fx"], ["py", "fy"], ["fx", "sf1"] + words, ["fy"] + words, words + ["wd"], ["sf1", "sf"],
-                 ["wd", "tf"], ["sf", "tf"], ["tf"] + fpals]
-    if tcolors:
-        nets += th.nets(tcolors)
-    return nets
+def role_key(name):
+    """Sort key of a chunk role: its group and prefix (ROLE_GROUPS), then its numbers."""
+    import re
+    m = re.match(r"([a-z]+)(.*)", name)
+    pre, rest = m.group(1), m.group(2)
+    nums = tuple(int(x) for x in re.findall(r"\d+", rest))
+    if pre == "tpal":   # woven with the wall palettes: one output network, two input networks
+        return (3, 1, nums, 1)
+    if pre == "wk":     # the first picture's kill next to V (most chunks have few)
+        return (1, 0, tuple(-x for x in nums), 0)
+    for gi, grp in enumerate(ROLE_GROUPS):
+        if name in grp:
+            return (gi, grp.index(name), (), 0)
+        if pre in grp:
+            return (gi, grp.index(pre), nums, 0)
+    raise ValueError(f"unknown chunk role {name}")
+
+
+def chunk_roles(units, k):
+    """{role: (column, row)} shared by every view chunk: ROLE_GROUPS left to right, each group's
+    roles filling columns of k rows, with an empty column after each group (room for relay poles)."""
+    present = {r for u in units for r in u if not r.startswith("hud")}
+    pos, c = {}, 0
+    for gi in range(len(ROLE_GROUPS)):
+        grp = sorted((r for r in present if role_key(r)[0] == gi), key=role_key)
+        for i, r in enumerate(grp):
+            pos[r] = (c + i // k, i % k)
+        if grp:
+            c += -(-len(grp) // k) + 1
+    return pos, c
+
+
+MARCH_COLS = ["fr16", "along", "across", "q", "lp", "ln", "hit", "key", "dist", "d"]
+
+
+def place_march(mg, x_right, y_bottom, hole):
+    """The march as a block ending at x_right, rows up to y_bottom: per side a header row (the
+    vectors every step shares) and one row per step, its ops left to right in MARCH_COLS; then
+    the min trees (distance and key levels interleaved, each node between its two inputs), the side
+    split and the texture keys. Returns the block's left x."""
+    ncols = len(MARCH_COLS) + 2 * len(mg["trees"]["minV"]) + 2
+    xs = slot_columns(ncols, hole, x_right)[::-1]   # left to right
+    rows_side = K + 2
+    y0 = y_bottom - 2 * rows_side
+    for side, (dn, kn) in enumerate((("minV", "keyV"), ("minH", "keyH"))):
+        top = y0 + side * rows_side
+        for c, name in enumerate(MARCH_COLS):
+            hd = mg[side]["head"].get(name)
+            if hd is not None and not hd.fixed:
+                hd.fixed, hd.pos = True, (xs[c], top)
+            for kk, st in enumerate(mg[side]["steps"]):
+                st[name].fixed, st[name].pos = True, (xs[c], top + 1 + kk)
+        prev = {dn: [top + 1 + kk for kk in range(K)], kn: [top + 1 + kk for kk in range(K)]}
+        for lv in range(len(mg["trees"][dn])):
+            for ti, tn in enumerate((dn, kn)):
+                c = len(MARCH_COLS) + 2 * lv + ti
+                ys = []
+                for i, nd in enumerate(mg["trees"][tn][lv]):
+                    y = round((prev[tn][2 * i] + prev[tn][2 * i + 1]) / 2)
+                    while any(y == q for q in ys):
+                        y += 1
+                    ys.append(y)
+                    nd.fixed, nd.pos = True, (xs[c], y)
+                prev[tn] = ys
+        c = len(MARCH_COLS) + 2 * len(mg["trees"][dn])
+        mg["split"][side].fixed, mg["split"][side].pos = True, (xs[c], prev[dn][0] + (2 if side == 0 else -2))
+        for i, nd in enumerate(mg["texkey"][side]):
+            nd.fixed, nd.pos = True, (xs[c + 1], prev[kn][0] - 2 + i)
+    return xs[0]
+
+
+def place_chunks(g, w, chunks, units, area, lookups, hole, k, mgrid=None):
+    """Fixed positions left of the screen. Chunk m's block is k rows tall at y = k m (so blocks may
+    drift a row or two from their lamps when a chunk is shorter than k); its nodes take the same
+    (column, row) per role in every chunk (chunk_roles), so a bus's consumers line up k rows
+    apart. Status bar units (roles "hud...") fill columns from the screen leftwards. `area` nodes
+    (spreads, per-color products, delays) go to the free spot nearest their consumers outside the
+    blocks (above them, mostly); the lookup block above those. Returns x_right for the compiler's
+    own placement (left of everything here)."""
+    pos, width = chunk_roles(units, k)
+    hud_w = max([-(-len(u) // k) for u in units if any(r.startswith("hud") for r in u)] or [0])
+    xs = slot_columns(max(width, hud_w), hole)   # xs[0] next to the screen
+    for m, u in enumerate(units):
+        y0 = chunks[0][0] + k * m
+        if any(r.startswith("hud") for r in u):
+            for i, nd in enumerate(u.values()):
+                nd.fixed, nd.pos = True, (xs[i // k], y0 + i % k)
+            continue
+        for r, nd in u.items():
+            c, row = pos[r]
+            nd.fixed, nd.pos = True, (xs[width - 1 - c], y0 + row)
+    band = (min(xs), chunks[0][0], 0, chunks[0][0] + k * len(units))   # x0, y0, x1, y1 (exclusive)
+    taken = {t for n in g.nodes if n.fixed and n.pos for t in _tiles(n)}
+    slots = set(xs)   # inside the band only free role slots, not the gap columns (relay poles)
+    consumers = {}
+    for n in g.nodes:
+        for s in n.red + n.green:
+            for m in (s.nodes if isinstance(s, Collect) else [s]):
+                consumers.setdefault(m.id, []).append(n)
+    ok = lambda x, y: ((x in slots or not (band[0] - 1 <= x < band[2] and band[1] <= y < band[3]))  # noqa: E731
+                       and x <= -2 and not hole(x, y) and not hole(x + 1, y)
+                       and (x, y) not in taken and (x + 1, y) not in taken)
+    top = 0
+    for nd in sorted(area, key=lambda n: -(n.time or 0)):
+        cs = [c.pos for c in consumers.get(nd.id, []) if c.pos]
+        if not cs:
+            raise ValueError(f"{nd} has no placed consumer")
+        tx = sum(p[0] for p in cs) / len(cs)
+        ty = min(p[1] for p in cs)
+        best = None
+        for r in range(0, 400):
+            for dx in range(-r, r + 1):
+                for dy in (-(r - abs(dx)), r - abs(dx)):
+                    x, y = round(tx) + dx, round(ty) + dy
+                    if ok(x, y):
+                        best = (x, y)
+                        break
+                if best:
+                    break
+            if best:
+                break
+        nd.fixed, nd.pos = True, best
+        taken |= {best, (best[0] + 1, best[1])}
+        top = min(top, best[1])
+        # Its constants (a combinator each) on the nearest free tiles.
+        for c in nd.red + nd.green:
+            if getattr(c, "kind", None) != "const" or c.fixed:
+                continue
+            spot = min(((best[0] + dx, best[1] + dy) for dx in range(-8, 10) for dy in range(-8, 9)
+                        if (best[0] + dx, best[1] + dy) not in taken and not hole(best[0] + dx, best[1] + dy)
+                        and best[0] + dx <= -2),
+                       key=lambda p: abs(p[0] - best[0]) + abs(p[1] - best[1]))
+            c.fixed, c.pos = True, spot
+            taken.add(spot)
+    y_area = top
+    # Lookup block above: the sprite lookups in its bottom rows (near the things' other consumers),
+    # then the strips column by column (each word bus a band of columns reaching down to its spreads).
+    cols_ = sorted(xs)
+    first, rest = lookups
+    for i, nd in enumerate(first):
+        nd.fixed, nd.pos = True, (cols_[i % len(cols_)], top - 2 - i // len(cols_))
+    top -= -(-len(first) // len(cols_))
+    per_col = -(-len(rest) // len(cols_))
+    for i, nd in enumerate(rest):
+        nd.fixed, nd.pos = True, (cols_[i // per_col], top - 2 - i % per_col)
+    x_right = min(xs) - 4
+    if mgrid:
+        x_right = place_march(mgrid, x_right - 2, y_area, hole) - 4
+    return x_right
+
+
+def _tiles(n):
+    x, y = n.pos
+    return {(x, y), (x + 1, y)} if n.kind != "const" else {(x, y)}
+
+
+def q_signal(s, quality):
+    """Signal s at a quality (Space Age): rows of a chunk are qualities of their columns' lanes."""
+    return dict(s, quality=quality) if quality != "normal" else s
 
 
 def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX, flat=DEFAULT_FLAT, things=None,
-                shade=None, hud=None, weapon=None):
+                shade=None, hud=None, weapon=None, rows_per_net=None):
     """camera(g) -> (A, PX, PY, extra scalars): view angle 0..255 and an odd position (1/FP
     tiles) as scalars of g. extra may hold "angle_offset", added to A by the tables, and
     "angle_sub": A counts 2^sub steps per view angle (0..(256 << sub) - 1). It must hold
@@ -431,14 +569,18 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
     textures = load_textures(tex, shade)
     NT, nw = len(textures), tex // 8
     flats = load_flats(flat, shade) if flat else None
-    sprites = th.load(sorted({n for _, _, n in things}), shade) if things else None
-    tcolors = len(sprites["colors"]) if things else 0
     bar = hd.Hud(w, h, shade) if hud else None
     proj, hv = h, h - (bar.hb if bar else 0)   # projection height; view rows
     arms = wp.Weapons(w, hv, shade, bar=bool(bar)) if weapon else None
 
     # -- scalars: the camera vectors come straight out of signed lookups keyed by the view angle.
     A, PX, PY, extra = camera(g)
+    # Things: extra may add "frames" (more sprite frames to load), "frame" (things.column_stage)
+    # and "aim" (aim(g, col, D, lane): hitscan nodes, combat.py).
+    names = {n for _, _, n in things or ()} | set(extra.pop("frames", ()))
+    sprites = th.load(sorted(names), shade) if things else None
+    tcolors = len(sprites["colors"]) if things else 0
+    frame, aim = extra.pop("frame", None), extra.pop("aim", None)
     # The march wants the position one tick after the angle; a later position would leave every
     # angle-derived vector waiting in delays, so delay the angle instead (shared).
     lag = max(PX.node.time, PY.node.time) - 1 - A.node.time
@@ -449,7 +591,9 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
     hide = extra.pop("hide", None)   # hide(g, i, out): thing i's hide flag (picked-up items), see things.py
     # A may count in 2^sub steps per view angle (finer turning); the tables key on A directly.
     sub = extra.pop("angle_sub", 0)
-    look = lambda name, table: g.lookup_scalar(A, {k: table[k >> sub] for k in range(256 << sub)}, 32, name)  # noqa: E731
+    # A may also run a little outside one turn (angle_range: game.py keeps R wrapped near it).
+    lo, hi = extra.pop("angle_range", (0, 256 << sub))
+    look = lambda name, table: g.lookup_scalar(A, {k: table[(k % (256 << sub)) >> sub] for k in range(lo, hi)}, 32, name)  # noqa: E731
     PLX = look("PLX", {a: tabs[a]["PLX"] for a in range(256)})
     PLY = look("PLY", {a: tabs[a]["PLY"] for a in range(256)})
     DX10 = look("DX10", ray_base(tabs, camx, "DX", "PLX"))
@@ -500,32 +644,42 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
             """Per lane where src cmp 0: a + add."""
             return g.decider([sem.cond(EACH, cmp, 0, RED)], [sem.out(EACH, constant=a), sem.out(EACH, networks=GREEN)],
                              red=src, green=add, label=label)
-        FR16 = g.vs(vec([-16] * w, "-16"), "*", FR, "-16 fr")
+        c16 = vec([-16] * w, "-16")
         FRD = g.vs(vec([-(DS * 4)] * w, "-DS fr"), "*", FR, "-DS fr")
         RDd = g.delay(RD, 1)
         x1 = 1 << 12 if side else 0
         hit_conds = key_ranges(wall_keys(side), 12)
-        dleaves, kleaves = [], []
+        dleaves, kleaves, steps = [], [], []
         for k in range(K):
-            # FR16 is ready a tick after RAW, so it joins on the product's wire (one copy per step).
+            # -16 FR is ready a tick after RAW, so it joins on the product's wire (one copy per step).
+            fr16 = g.vs(c16, "*", FR, f"-16 fr{side}.{k}")
             along = g.decider([sem.cond(EACH, ">", 0, RED)], [sem.out(EACH, constant=4096 * (k + 1))],
                               [sem.out(EACH, constant=-4096 * k)] if k else None, red=RAW, label=f"along{side}.{k}")
-            Q = g.vv(g.vv(RO, "*", [along, FR16], f"across{side}.{k}"), "/", RD, f"q{side}.{k}")
+            across = g.vv(RO, "*", [along, fr16], f"across{side}.{k}")
+            Q = g.vv(across, "/", RD, f"q{side}.{k}")
             Lp = line(RDd, ">", ((k + 2 - side) << 18) + x1, ZBp, f"line+{side}.{k}")
             Ln = line(RDd, "<", ((NEG + k + 1) << 18) + x1, ZBn, f"line-{side}.{k}")
             hit = g.decider(hit_conds, [sem.out(EACH, constant=HIT)], red=[Q, Lp, Ln], label=f"hit{side}.{k}")
             key = g.op("arith", sem.arith_spec(EACH, "+", 0, EACH, RED), red=[Q, Lp, Ln], label=f"key{side}.{k}")
-            D = g.vv(sel(RDd, (k + 1) * DS * 1024, -k * DS * 1024, FRD, f"dist{side}.{k}"), "/", RD, f"d{side}.{k}")
+            dist = sel(RDd, (k + 1) * DS * 1024, -k * DS * 1024, FRD, f"dist{side}.{k}")
+            D = g.vv(dist, "/", RD, f"d{side}.{k}")
             dleaves.append([hit, D])
             kleaves.append([hit, key])
+            steps.append({"fr16": fr16, "along": along, "across": across, "q": Q, "lp": Lp, "ln": Ln, "hit": hit,
+                          "key": key, "dist": dist, "d": D})
+        mgrid[side] = {"steps": steps, "head": {"fr16": c16, "lp": ZBp, "ln": ZBn, "dist": FRD, "q": RD, "d": RDd}}
         return dleaves, kleaves
 
     # Nearest hit per side: a min tree (lane-wise: copy red if smaller, else green). The key tree
     # pairs its leaves the other way round, so each hit decider feeds one red and one green network.
+    mgrid = {}
+
     def tree(level, name, swap=False):
         depth = 0
+        levels = mgrid.setdefault("trees", {}).setdefault(name, [])
         while len(level) > 1:
             nxt = []
+            levels.append(nxt)
             for i, (a, b) in enumerate(zip(level[::2], level[1::2])):
                 r, gr = (b, a) if swap and depth == 0 else (a, b)
                 nxt.append(g.decider([sem.cond(EACH, "<", EACH, RED, None, GREEN)], [sem.out(EACH, networks=RED)],
@@ -544,12 +698,17 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
                    red=M0, green=M1, label="nearest V")
     MH = g.decider(cmp(">="), [sem.out(EACH, networks=GREEN), sem.out(EACH, constant=1 << 30)],
                    red=M0, green=M1, label="nearest H")
-    t_v = MV.time + 1   # the rows' V
+    # Rows come in chunks of k screen rows on one network: row q of a chunk is quality q of the
+    # column's lane signal (Space Age). Per-column vectors reach the other qualities through
+    # quality transfers (spread, one tick), so V lands one tick after the split's tick + 1.
+    k = rows_per_net or DEFAULT_ROWS
+    Q = QUALITY_LANES[:k]
+    sp = 1 if k > 1 else 0
+    t_V = MV.time + 1 + sp   # the chunks' V
     if things:
-        col = th.column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_v, shade, hide)
-        DD = th.visible(g, MV, MH, col)
-        SC = th.colors_bus(g, DD, col, sprites, t_v)
-        wbus = [g.delay(n, t_v - n.time) for n in col["wsum"]]
+        col = th.column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_V - sp, shade, hide, frame)
+        if aim:
+            aim(g, col, [MV, MH], cols[w // 2])
 
     # -- texture key per side: TK = (type + 1) << 12 | u << (12 - log2 tex), u the texture column
     # (from the key's low bits), type from range tests on the key (HIT + key).
@@ -560,6 +719,8 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
                            red=Ks, label=f"type{side}.{ty}") for ty in range(NT)]
         return [u] + types
     sides = [(0, texkey(K0, 0), MV), (1, texkey(K1, 1), MH)]
+    mgrid["split"] = [MV, MH]
+    mgrid["texkey"] = [sides[0][1], sides[1][1]]
 
     # Texture strips: one decider per (side, type, column, word), gated by the side being nearest,
     # so the words come out one tick after the split. Fixed block below the rows.
@@ -585,199 +746,254 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
     BR = g.vv(vec([shade.bright] * w, "bright"), "/", [MV, MH, vec([shade.fog] * w, "fog")], "brightness")
     CT = {c: g.vv(pal[c], "*", BR, f"color{c}") for c in pal}
 
-    # -- rows. Texel row v = tex/2 + r * tex * D / (H * 2^16) for r = 2y + 1 - H, kept as
-    # V = 4 (v - tex/2) = D / c_y: one division per row. The wall covers |V| < 2 tex.
+    # -- chunks: k screen rows per network, row q of a chunk on quality q of its columns' lanes.
+    #
+    # Walls: texel row v = tex/2 + r * tex * D / (proj * 2^16) for r = 2y + 1 - hv, kept as
+    # V = 4 (v - tex/2) = D / c_y (c_y a constant vector over the chunk's lanes); the wall covers
+    # |V| < 2 tex. A mux per word, a shift by V AND 28, one palette decider per texel value.
+    # Out-of-wall lanes get no texel; the flat select (bounded out-of-wall V) copies the flat color.
     #
     # Flats: the pixel's position within its tile, times 2^32: F = RAW * K_y + (P << 24) per axis
     # (products wrap). Its top fb bits are the flat texel (u from X, v from Y); one decider per
-    # word (flat row v, u >> 3) outputs 8 packed texels, and Sf = (FX >> (30 - fb)) AND 28 picks
-    # the texel. Floor pixels are where the wall's texel is 15; one decider per flat color there.
-    fb = flat.bit_length() - 1 if flat else 0
-    words_of = [f"w{v}.{j}" for v in range(flat) for j in range(flat // 8)] if flat else []
-    names = row_slots(nw, words_of, flat, tcolors)
-    if arms:   # the weapon's deciders, then the compositor next to the screen
-        names += [f"wc{i}" for i in reversed(range(arms.width()))] + ["comp"]
-    xs = slot_columns(len(names), hole)
-    X = dict(zip(reversed(names), xs))
+    # word (flat row v, u >> 3) outputs 8 packed texels, Sf = (FX >> (30 - fb)) AND 28 picks the
+    # texel, one decider per flat color gives its color, times the row's brightness (a constant
+    # vector: the distance is proj / |r|). All from RAW, early: it's ready with V.
+    #
+    # Things and the weapon kill a pixel by adding KILL to V (no wall mux or flat select fires)
+    # and paint their own colors at the palette tick. The weapon also kills the things' texel path
+    # (its Vs, read on green, so one kill decider feeds both).
+    if hv % 2:
+        raise SystemExit(f"view height {hv}: must be even (the horizon falls between two rows)")
+    lane = lambda x, q: q_signal(cols[x], Q[q])  # noqa: E731
+    half = hv // 2
+    split = lambda lo, hi: [(y, min(k, hi - y)) for y in range(lo, hi, k)]  # noqa: E731
+    chunks = split(0, half) + split(half, hv)
+
+    def cv(ch, f, label):
+        """A constant over chunk ch's lanes: f(x, y) on column x of row y."""
+        y0, n = ch
+        return g.const([(lane(x, q), f(x, y0 + q)) for q in range(n) for x in range(w)], label)
+
+    def at(src, t):
+        if isinstance(src, (list, tuple)):
+            return Collect([at(x, t) for x in src])
+        return g.delay(src, t - src.time)
+    bus_nodes = []
+
+    def bus(src, t, label):
+        """src's lanes on every quality (k > 1), landing at t."""
+        n0 = len(g.nodes)
+        out = g.spread(at(src, t - 1), Q, label) if sp else at(src, t)
+        bus_nodes.append((label, g.nodes[n0:]))
+        return out
+
+    t_P = t_V + 3   # the palettes' output: the lamps' tick
+    n_area = len(g.nodes)
+    D6 = bus([MV, MH], t_V - 1, "D")
+    W6 = [bus(words[j], t_V, f"word{j}") for j in range(nw)]
+    CT6 = {c: bus(CT[c], t_P - 1, f"color{c}") for c in CT}
     if flat:
+        fb = flat.bit_length() - 1
         sums = [g.op("arith", sem.arith_spec(EACH, "+", 0, EACH, RED), red=raw, label=f"raw {a}")
                 for a, raw in (("x", RAWX), ("y", RAWY))]
+        R6 = [bus(n, t_V - 7, f"raw {a}") for n, a in zip(sums, "xy")]
         Ps = [g.ss(P, "<<", 24, f"frac {a}") for a, P in (("x", PX), ("y", PY))]
-    rows, palettes = [], []
+    if things:
+        Dt6 = bus(col["Dt"], t_V - 4, "thing depth")
+        M6 = bus(col["masks"], t_V - 2, "thing mask")
+        WB6 = [bus(n, t_V, f"thing word{j}") for j, n in enumerate(col["wsum"])]
+        NSD6 = g.vc(Dt6, "/", -512, "-thing depth")
+        # Thing brightness where it is in front of the wall, then per color.
+        DD = [MV, MH, at(col["NSD"], MV.time)]
+        BRS = at(col["BRS"], MV.time)
+        VB = g.decider([sem.cond(EACH, ">", 0, GREEN)], [sem.out(EACH, networks=RED)], red=BRS, green=DD, label="thing visible")
+        VB6 = bus(VB, t_P - 2, "thing visible")
+        SC6 = {c: g.vc(VB6, "*", th.color(c4, 1), f"thing color{c}") for c, c4 in enumerate(sprites["colors"], 1)}
     if arms:
         WF = weapon(g, extra)
-        Fc = None
-    for y in range(hv):
-        r = 2 * y + 1 - hv
-        cy = round(proj * (1 << 14) / (r * tex))
-        V = g.vc([MV, MH], "/", cy, f"v{y}")
-        node = {"v": V}
-        tpals = []
-        if things and y >= th.first_row(hv):
-            # A thing's opaque texel in front of the wall adds 2^29 to V: no wall mux or bg fires.
-            node.update(th.row_kill(g, y, hv, col, DD, proj))
-            V = [V, node["kill"]]
-            tnode, tpals = th.row_texels(g, y, hv, col, SC, wbus, proj)
-            node.update(tnode)
+        KILL_W = at(WF.node, t_V - 1)
+        COLOR_W = at(WF.node, t_P - 1)
+    nib = lambda c, wire=RED, first=None: nibble_range(c, wire, first)  # noqa: E731
+    lim = th.KILL >> 1   # V outside +-lim is a killed pixel
+    out_of_wall = [sem.cond(EACH, "<", -2 * tex, RED), sem.cond(EACH, ">=", -lim, RED, "and"),
+                   sem.cond(EACH, ">=", 2 * tex, RED, "or"), sem.cond(EACH, "<", lim, RED, "and")]
+    rows, units = [], []
+    for ch in chunks:
+        y0, n = ch
+        floor = y0 >= half
+        node = {}
+        cyf = lambda x, y: round(proj * (1 << 14) / ((2 * y + 1 - hv) * tex))  # noqa: E731
+        node["kcy"] = cv(ch, cyf, "c_y")
+        V = g.vv(D6, "/", node["kcy"], f"v{y0}")
+        node["v"] = V
+        kills, wk = [], []
+        if arms:
+            for cid, px in sorted(arms.chunk(y0, n).items()):
+                kv = [sem.out(lane(x, y - y0), constant=th.KILL) for x, y, _ in px]
+                wk.append(Node(g, "decider", sem.decider_spec([sem.cond(WF.signal, "=", cid, RED)], kv),
+                               red=[KILL_W], time=t_V, label=f"weapon kill{y0}.{cid}"))
+            node.update({f"wk{i}": d for i, d in enumerate(wk)})
+        if things and floor:
+            node["kcsq"] = cv(ch, lambda x, y: 4 * th.row_divisor(y, hv, proj), "4 c_s")
+            Qn = g.vv(Dt6, "/", node["kcsq"], f"tq{y0}")
+            P2 = g.op("arith", sem.arith_spec(2, "^", EACH, EACH, None, RED), red=[Qn], label=f"tp{y0}")
+            OM = g.vv(M6, "*", P2, f"tom{y0}")
+            kill = g.decider([sem.cond(EACH, "<", 0, RED), sem.cond(EACH, ">", 0, GREEN, "and")],
+                             [sem.out(EACH, constant=th.KILL)], red=OM, green=[D6, NSD6], label=f"kill{y0}")
+            node.update({"tq": Qn, "tp": P2, "tom": OM, "kill": kill})
+            kills.append(kill)
+        Vk = [V] + kills + wk
         mux = [g.decider([sem.cond(EACH, "!=", 0, GREEN), sem.cond(EACH, ">=", 4 * (8 * j - tex // 2), RED, "and"),
                           sem.cond(EACH, "<", 4 * (8 * j + 8 - tex // 2), RED, "and")],
-                         [sem.out(EACH, networks=GREEN)], red=V, green=words[j], label=f"mux{y}.{j}") for j in range(nw)]
-        lim = th.KILL >> 1   # V outside +-lim is a killed pixel
-        bg = g.decider([sem.cond(EACH, "<", -2 * tex, RED), sem.cond(EACH, ">=", -lim, RED, "and"),
-                        sem.cond(EACH, ">=", 2 * tex, RED, "or"), sem.cond(EACH, "<", lim, RED, "and")],
-                       [sem.out(EACH, constant=-1)], red=V, label=f"bg{y}")
-        S = g.vc(V, "AND", 28, f"nibble{y}")
-        T = g.vv(mux + [bg], "<<", S, f"texel{y}")
-        node.update({"bg": bg, "S": S, "shift": T, **{f"mux{j}": m for j, m in enumerate(mux)}})
-        pals = [g.decider(nibble_range(c), [sem.out(EACH, networks=GREEN)], red=T, green=CT[c], label=f"pal{y}.{c}")
-                for c in pal]
-        node.update({f"pal{c}": n for c, n in zip(pal, pals)})
-        if not flat:
-            fl = g.decider(nibble_range(15), [sem.out(EACH, constant=pack(background(y, hv)))], red=T, label=f"floor{y}")
-            node["pal15"] = fl
-            pals = [fl] + pals
-        else:
-            part = flats["floor" if r > 0 else "ceiling"]
-            ky, br = row_scale(y, hv, shade, proj)
-            # The raw rays, delayed so the flat texel lands with the wall's.
-            at = T.time - 5
-            if sums[0].time > at:
-                raise ValueError("flat path too long for the row stage")
-            RX, RY = (g.delay(n, at - n.time) for n in sums)
-            pxy = [g.vc(RX, "*", ky, f"fx{y}*"), g.vc(RY, "*", ky, f"fy{y}*")]
-            FX, FY = (g.vs(n, "+", P, f"f{a}{y}") for n, P, a in zip(pxy, Ps, "xy"))
-            node.update({"px": pxy[0], "py": pxy[1], "fx": FX, "fy": FY})
+                         [sem.out(EACH, networks=GREEN)], red=Vk, green=W6[j], label=f"mux{y0}.{j}") for j in range(nw)]
+        S = g.vc(Vk, "AND", 28, f"nibble{y0}")
+        T = g.vv(mux, "<<", S, f"texel{y0}")
+        node.update({"s": S, "t": T, **{f"mux{j}": m for j, m in enumerate(mux)}})
+        pals = [g.decider(nib(c), [sem.out(EACH, networks=GREEN)], red=T, green=CT6[c], label=f"pal{y0}.{c}") for c in CT]
+        node.update({f"pal{c}": p for c, p in zip(CT, pals)})
+        out = list(pals)
+        # The floor or ceiling where V is out of the wall.
+        if flat:
+            part = flats["floor" if floor else "ceiling"]
+            KY = node["kky"] = cv(ch, lambda x, y: row_scale(y, hv, shade, proj)[0], "k_y")
+            FXp, FYp = (g.vv(R, "*", KY, f"f{a}{y0}*") for R, a in zip(R6, "xy"))
+            FX, FY = (g.vs(n, "+", Pa, f"f{a}{y0}") for n, Pa, a in zip((FXp, FYp), Ps, "xy"))
+            node.update({"fxp": FXp, "fyp": FYp, "fx": FX, "fy": FY})
             ws = []
             for v in range(flat):
                 for j in range(flat // 8):
                     word = flat_word(part["texels"], v, j)
-                    if not word:
-                        continue
-                    conds = top_range(j, fb - 3, RED) if fb > 3 else []
-                    conds += top_range(v, fb, GREEN, "and" if conds else None)
-                    n = g.decider(conds, [sem.out(EACH, constant=word)], red=FX, green=FY, label=f"flat{y}.{v}.{j}")
-                    ws.append(n)
-                    node[f"w{v}.{j}"] = n
-            node["sf1"] = g.vc(FX, ">>", 30 - fb, f"fu{y}")
-            node["sf"] = g.vc(node["sf1"], "AND", 28, f"fs{y}")
-            node["wd"] = g.op("arith", sem.arith_spec(EACH, "+", 0, EACH, RED), red=ws, label=f"fword{y}")
-            node["tf"] = Tf = g.vv(node["wd"], "<<", node["sf"], f"ftexel{y}")
-            fpals = []
-            for c, c4 in enumerate(part["c4"]):
-                n = g.decider(nibble_range(15) + nibble_range(c, GREEN, "and"), [sem.out(EACH, constant=flat_color(c4, br))],
-                              red=T, green=Tf, label=f"fpal{y}.{c}")
-                node[f"fpal{c}"] = n
-                fpals.append(n)
-            pals = fpals + pals
-        pals = pals + tpals
-        out = pals
+                    if word:
+                        conds = (top_range(j, fb - 3, RED) if fb > 3 else []) + top_range(v, fb, GREEN, "and" if fb > 3 else None)
+                        ws.append(g.decider(conds, [sem.out(EACH, constant=word)], red=FX, green=FY, label=f"flat{y0}.{v}.{j}"))
+                        node[f"w{v}.{j}"] = ws[-1]
+            sf = g.vc(g.vc(FX, ">>", 30 - fb, f"fu{y0}"), "AND", 28, f"fs{y0}")
+            wd = g.op("arith", sem.arith_spec(EACH, "+", 0, EACH, RED), red=ws, label=f"fword{y0}")
+            Tf = g.vv(wd, "<<", sf, f"ftexel{y0}")
+            ones = node["kones"] = cv(ch, lambda x, y: 1, "ones")
+            fci = [g.decider(nib(c) + [sem.cond(EACH, "!=", 0, GREEN, "and")], [sem.out(EACH, constant=pack(c4) or 1)],
+                             red=Tf, green=ones, label=f"fpal{y0}.{c}") for c, c4 in enumerate(part["c4"])]
+            node["kbr"] = cv(ch, lambda x, y: max(1, row_scale(y, hv, shade, proj)[1]), "flat brightness")
+            FC = g.vv(fci, "*", node["kbr"], f"flat{y0}")
+            node.update({"fu": sf.red[0], "fs": sf, "wd": wd, "tf": Tf, "fc": FC, **{f"fpal{c}": d for c, d in enumerate(fci)}})
+        else:
+            FC = node["kbg"] = cv(ch, lambda x, y: pack(background(y, hv)), "background")
+        sel = g.decider(out_of_wall, [sem.out(EACH, networks=GREEN)], red=Vk, green=FC, label=f"flat select{y0}")
+        # Its output crosses the weapon kills on their green inputs (which they don't read) to e1.
+        e1 = g.op("arith", sem.arith_spec(EACH, "+", 0, EACH, GREEN), green=[sel], label=f"delay flat select{y0}")
+        e2 = g.delay(e1, 1)
+        for d in wk:
+            d.green, d.nominal = [sel], "green"
+        node.update({"sel": sel, "e1": e1, "e2": e2})
+        out.append(e2)
+        if things and floor:
+            # The thing's texel row: Vs = Dt / cs_y on green, where the weapon's kill joins it.
+            node["kcs"] = cv(ch, lambda x, y: th.row_divisor(y, hv, proj), "c_s")
+            Vs = g.op("arith", sem.arith_spec(EACH, "/", EACH, EACH, GREEN, RED),
+                      red=[node["kcs"]], green=[at(Dt6, t_V - 1)], label=f"tv{y0}")
+            Vsk = [Vs] + wk
+            tm = [g.decider([sem.cond(EACH, "!=", 0, RED), sem.cond(EACH, ">=", 32 * j, GREEN, "and"),
+                             sem.cond(EACH, "<", 32 * j + 32, GREEN, "and")], [sem.out(EACH, networks=RED)],
+                            red=WB6[j], green=Vsk, label=f"tmux{y0}.{j}") for j in range(th.HP // 8)]
+            tS = g.op("arith", sem.arith_spec(EACH, "AND", 28, EACH, GREEN), green=Vsk, label=f"tnib{y0}")
+            tT = g.vv(tm, "<<", tS, f"ttexel{y0}")
+            tp = [g.decider(nib(c), [sem.out(EACH, networks=GREEN)], red=tT, green=SC6[c], label=f"tpal{y0}.{c}")
+                  for c in SC6]
+            node.update({"tv": Vs, "tnib": tS, "tt": tT, **{f"tmux{j}": m for j, m in enumerate(tm)},
+                         **{f"tpal{c}": p for c, p in zip(SC6, tp)}})
+            out += tp
         if arms:
-            # Weapon overlay: per picture covering this row, a decider outputting its pixels on
-            # the weapon's network (red); the compositor copies those lanes, and the view (green)
-            # on the rest. The weapon deciders also read the view on green (their conditions
-            # don't), so the view's network can run through them to the compositor.
-            t_p = pals[0].time
-            if Fc is None:
-                Fc = g.delay(WF.node, t_p - 1 - WF.node.time)
-                Fc.fixed, Fc.pos = True, (X["wc0"], -1)
-            wcs = []
-            here = arms.rows.get(y, [])
-            # Spread over the block, so both networks run through them with few relay poles.
-            for i, (cid, px) in enumerate(here):
-                i = i * arms.width() // len(here)
-                n = Node(g, "decider", sem.decider_spec([sem.cond(WF.signal, "=", cid, RED)],
-                                                        [sem.out(cols[x], constant=v) for x, v in px]),
-                         red=[Fc], green=pals, time=t_p, label=f"weapon{y}.{cid}")
-                node[f"wc{i}"] = n
-                wcs.append(n)
-            node["comp"] = comp = Node(
-                g, "decider", sem.decider_spec([sem.cond(EACH, "!=", 0, RED), sem.cond(EACH, ">=", -(1 << 31), GREEN, "and")],
-                                               [sem.out(EACH, networks=RED)], [sem.out(EACH, networks=GREEN)]),
-                red=wcs, green=pals, time=t_p + 1, label=f"compose{y}")
-            out = [comp]
-        for name, n in node.items():
-            n.fixed, n.pos = True, (X[name], y)
+            wc = []
+            for i, (cid, px) in enumerate(sorted(arms.chunk(y0, n).items())):
+                wc.append(Node(g, "decider", sem.decider_spec([sem.cond(WF.signal, "=", cid, RED)],
+                                                              [sem.out(lane(x, y - y0), constant=v) for x, y, v in px]),
+                               red=[COLOR_W], time=t_P, label=f"weapon{y0}.{cid}"))
+            node.update({f"wc{i}": d for i, d in enumerate(wc)})
+            out += wc
+        for o in out:
+            if o.time != t_P:
+                raise ValueError(f"{o.label} lands at {o.time}, the palettes at {t_P}")
         rows.append(Collect(out))
-        palettes.append(out)
-        check_row_reach(X, node, nw, words_of, flat, tcolors)
-    # Color buses: the product and its alignment delay above their palette column.
-    for c, n in CT.items():
-        n.fixed, n.pos = True, (X[f"pal{c}"], -2)
-        d = g.delay(n, 1)
-        d.fixed, d.pos = True, (X[f"pal{c}"], -1)
-    if things:
-        # Thing color products and word sums, with their delays, in the empty thing slots above
-        # the first thing row.
-        y0 = th.first_row(hv)
-        for c, n in SC.items():
-            n.fixed, n.pos = True, (X[f"spal{c}"], y0 - 2)
-            d = g.delay(n, 1)
-            d.fixed, d.pos = True, (X[f"spal{c}"], y0 - 1)
-        for j, (n, d) in enumerate(zip(col["wsum"], wbus)):
-            n.fixed, n.pos = True, (X[f"smux{j}"], y0 - 2)
-            d.fixed, d.pos = True, (X[f"smux{j}"], y0 - 1)
-    # The strip block: below the rows, filled column by column (word by word); thing lookups after.
-    block = [n for ws in words for n in ws] + (col["lookups"] if things else [])
-    block_cols = sorted(xs)
-    per_col = -(-len(block) // len(block_cols))
-    for i, n in enumerate(block):
-        n.fixed, n.pos = True, (block_cols[i // per_col], h + 2 + i % per_col)
-    # The status bar: its deciders left of the screen in its own rows, landing with the view rows.
-    x_right, bg = min(xs) - 4, {}
+        units.append(node)
+
+    # The status bar: chunks of its rows, landing with the view.
+    bg = {}
     if bar:
         hs, sigs = hud(g, extra)
-        xs_h = slot_columns(bar.width(), hole)
-        hrows = bar.build(g, hs, sigs, cols, rows[0].time, hv, xs_h)
+        bchunks = split(hv, h)
+        hrows, hunits, hbg = bar.build_chunks(g, hs, sigs, lane, t_P, bchunks)
         rows += hrows
-        palettes += bar.nodes
-        bg = {hv + yb: r for yb, r in enumerate(bar.bg)}
-        x_right = min(x_right, min(xs_h) - 4)
+        units += hunits
+        chunks += bchunks
+        bg = dict(zip(range(len(chunks) - len(bchunks), len(chunks)), hbg))
         extra["hud"] = (hs, sigs)
     if arms:
         extra["weapon"] = WF
-    layout = {"x_right": x_right, "palettes": palettes, "textures": textures, "tex": tex, "flats": flats,
-              "flat": flat, "things": things, "sprites": sprites, "shade": shade, "hv": hv, "proj": proj,
-              "hud": bar, "bg": bg, "weapon": arms}
+    lookups = (col["lookups"] if things else [], [n for ws in words for n in ws])
+    area = [n for n in g.nodes[n_area:] if n.kind != "const" and not any(n in u.values() for u in units)]
+    area += [n for _, ns in bus_nodes for n in ns] + list(CT.values()) + [BR] + [n for ps in pal.values() for n in ps]
+    if things:
+        area += col["wsum"] + [col["NSD"], col["BRS"]]
+    area = list({n.id: n for n in area if n.kind != "const"}.values())
+    x_right = place_chunks(g, w, chunks, units, area, lookups, hole, k, mgrid)
+    layout = {"x_right": x_right, "textures": textures, "tex": tex, "flats": flats, "flat": flat, "things": things,
+              "sprites": sprites, "shade": shade, "hv": hv, "proj": proj, "hud": bar, "bg": bg, "weapon": arms,
+              "chunks": chunks, "lane": lane, "k": k}
     return g, cols, rows, {**extra, "A": A, "PX": PX, "PY": PY, "tables": tabs, "angle_sub": sub}, layout
 
 
-def check_row_reach(X, node, nw, words, flats, tcolors=0):
-    """Every row-local network's members, in x order, within wire reach (combinators are 2 wide)."""
-    for net in row_nets(nw, words, flats, tcolors):
-        xs = sorted(X[n] for n in net if n in node)
-        for a, b in zip(xs, xs[1:]):
-            if b - a - 2 > 9:
-                raise ValueError(f"row slots out of reach: {net} ({a} -> {b})")
+def _footprint(b, e):
+    """Tile footprint (x0, y0, x1, y1) of blueprint entity e (combinators face east here)."""
+    en = b.entities[e - 1]
+    x, y = en["position"]["x"], en["position"]["y"]
+    wd, ht = (2, 1) if "combinator" in en["name"] and en["name"] != "constant-combinator" else (1, 1)
+    return (x - wd / 2, y - ht / 2, x + wd / 2, y + ht / 2)
 
 
-def wire_screen(b, ent, cols, layout, w, h):
-    """Lamps, each row fed by its palette deciders (whose outputs are chained). A status bar row
-    also gets its static colors from a constant combinator right of the screen."""
+def wire_screen(b, ent, cols, layout, w, h, rows):
+    """Lamps: each chunk's rows snake through one network fed by its output deciders (chained), a
+    lamp reading its column's lane at its row's quality. A status bar chunk also gets its static
+    colors from a constant combinator right of the screen."""
     lattice = b.grid.hole
-    for y, pals in enumerate(layout["palettes"]):
-        es = sorted((ent[n.id][1] for n in pals), key=lambda e: -b.entities[e - 1]["position"]["x"])
-        b.chain(es, 3)
-        lamps = [b.lamp(x, y, {"use_colors": True, "color_mode": 2, "rgb_signal": cols[x]}, always_on=True)
-                 for x in range(w) if not lattice(x, y)]
+    lane = layout["lane"]
+    for ci, ((y0, n), r) in enumerate(zip(layout["chunks"], rows)):
+        es = [ent[m.id][1] for m in r.nodes] if r else []
+        lamps, right = [], None
+        for q in range(n):
+            xs = range(w) if q % 2 == 0 else range(w - 1, -1, -1)
+            row = [(x, b.lamp(x, y0 + q, {"use_colors": True, "color_mode": 2, "rgb_signal": lane(x, q)}, always_on=True))
+                   for x in xs if not lattice(x, y0 + q)]
+            lamps += [e for _, e in row]
+            right = max(row)[1]
         if es:
-            b.wire(es[0], 3, lamps[0], 1)
+            # The outputs and the chunk's first lamp: a spanning tree, relay poles where needed.
+            ends = [(e, 3, _footprint(b, e)) for e in es] + [(lamps[0], 1, _footprint(b, lamps[0]))]
+            usable = lambda x, y: x <= -2 and not lattice(x, y)  # noqa: E731
+            taken = b.occupied()
+            for d, i, j in nl._mst([f for _, _, f in ends]):
+                (a, ca, fa), (c, cc, fc) = ends[i], ends[j]
+                if d > nl.REACH:
+                    nl._relay(b, fa, (a, ca), fc, (c, cc), 1, usable, taken)
+                else:
+                    b.wire(a, ca, c, cc)
         b.chain(lamps, 1)
-        if y in layout["bg"]:
+        if ci in layout["bg"]:
+            y = y0 + n - 1
             x = w if not lattice(w, y) else w + 2
-            c = b.constant(x, y, [(cols[i], v) for i, v in enumerate(layout["bg"][y])])
-            b.wire(c, 1, lamps[-1], 1)
+            b.wire(b.constant(x, y, layout["bg"][ci]), 1, right, 1)
 
 
 def build(w, h, substation_quality=DEFAULT_SUBSTATION_QUALITY, tex=DEFAULT_TEX, flat=DEFAULT_FLAT, things=th.THINGS,
-          shade=None, hud=None, weapon=None):
+          shade=None, hud=None, weapon=None, rows=DEFAULT_ROWS):
     if w > len(LANE_SIGNALS):
         raise SystemExit(f"width {w} needs {w} lane signals, only {len(LANE_SIGNALS)}")
     b = Blueprint(f"Raycaster M4 {w}x{h}", substation_quality)
     lattice = b.grid.hole
-    g, cols, rows, scal, layout = build_graph(w, h, hole=lattice, tex=tex, flat=flat, things=things, shade=shade,
-                                              hud=hud, weapon=weapon)
+    g, cols, rows_, scal, layout = build_graph(w, h, hole=lattice, tex=tex, flat=flat, things=things, shade=shade,
+                                               hud=hud, weapon=weapon, rows_per_net=rows)
+    rows = rows_
     ent = g.compile(b, blocked=lattice, region=lambda x, y: x <= -2, x_right=layout["x_right"])
-    wire_screen(b, ent, cols, layout, w, h)
+    wire_screen(b, ent, cols, layout, w, h, rows)
     _substations(b)
     b.power()
     b.link_power()
@@ -804,16 +1020,18 @@ def _substations(b):
 # ---------------------------------------------------------------------------------------------
 # Reference images
 
-def evaluate(g, cols, rows, T, layout=None, inputs=None):
-    """The screen's lamp values from the netlist evaluation (status bar rows: their constant row
-    plus their deciders; a row of None has no deciders)."""
-    outs = iter(g.evaluate(T, [r for r in rows if r is not None], inputs))
-    bg = layout["bg"] if layout else {}
-    img = []
-    for y, r in enumerate(rows):
-        o = next(outs) if r is not None else {}
-        base = bg.get(y)
-        img.append([sem.i32(o.get(sem.key(c), 0) + (base[x] if base else 0)) for x, c in enumerate(cols)])
+def evaluate(g, cols, rows, T, layout, inputs=None):
+    """The screen's lamp values from the netlist evaluation: each chunk's output (plus a status bar
+    chunk's constant colors), lane by lane."""
+    live = g.evaluate(T, [r for r in rows if r is not None], inputs)[::-1]
+    outs = [live.pop() if r is not None else {} for r in rows]
+    img = [[0] * len(cols) for _ in range(sum(n for _, n in layout["chunks"]))]
+    for ci, ((y0, n), o) in enumerate(zip(layout["chunks"], outs)):
+        base = {sem.key(sg): v for sg, v in layout["bg"].get(ci, [])}
+        for q in range(n):
+            for x in range(len(cols)):
+                s = layout["lane"](x, q)
+                img[y0 + q][x] = sem.i32(o.get(sem.key(s), 0) + base.get(sem.key(s), 0))
     return img
 
 
@@ -828,7 +1046,7 @@ def ideal(g, scal, layout, w, h, T):
     """Float raycaster from the same camera scalars, textured and shaded the same way: a sanity
     check for the fixed-point math (not expected to match every pixel)."""
     vals = {k: g.evaluate(T, [scal[k].node])[0].get(sem.key(scal[k].signal), 0) for k in ("A", "PX", "PY")}
-    vals.update(scal["tables"][vals["A"] >> scal["angle_sub"]])
+    vals.update(scal["tables"][(vals["A"] % (256 << scal["angle_sub"])) >> scal["angle_sub"]])
     tex, textures, types, flats, f = layout["tex"], layout["textures"], wall_types(), layout["flats"], layout["flat"]
     px, py = vals["PX"] / FP, vals["PY"] / FP
     hv, proj = layout["hv"], layout["proj"]

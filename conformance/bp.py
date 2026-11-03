@@ -63,10 +63,17 @@ def quality_arg(ap):
 LETTERS = [f"signal-{c}" for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"] + [f"signal-{d}" for d in range(10)]
 
 
-def sig(name, typ="virtual"):
-    if typ == "item":
-        return {"name": name}
-    return {"type": typ, "name": name}
+QUALITY_LANES = ["normal", "uncommon", "rare", "epic", "legendary", "quality-unknown"]   # Space Age
+
+
+SECTION_SLOTS = 1000   # filters per constant combinator section (the game's limit)
+
+
+def sig(name, typ="virtual", quality=None):
+    s = {"name": name} if typ == "item" else {"type": typ, "name": name}
+    if quality and quality != "normal":
+        s["quality"] = quality
+    return s
 
 
 EACH = sig("signal-each")
@@ -102,11 +109,13 @@ class Blueprint:
         """signals: list of (SignalID dict, count) or dict name->count (virtual signals)."""
         if isinstance(signals, dict):
             signals = [(sig(k), v) for k, v in signals.items()]
-        filters = []
-        for i, (s, count) in enumerate(signals, 1):
-            f = {"index": i, **s, "quality": "normal", "comparator": "=", "count": count}
-            filters.append(f)
-        cb = {"sections": {"sections": [{"index": 1, "filters": filters}]}}
+        # A section holds at most SECTION_SLOTS filters; longer lists take several sections.
+        sections = []
+        for k in range(0, max(1, len(signals)), SECTION_SLOTS):
+            filters = [{"index": i, **s, "quality": s.get("quality", "normal"), "comparator": "=", "count": count}
+                       for i, (s, count) in enumerate(signals[k:k + SECTION_SLOTS], 1)]
+            sections.append({"index": len(sections) + 1, "filters": filters})
+        cb = {"sections": {"sections": sections}}
         if not enabled:
             cb["is_on"] = False
         return self._add("constant-combinator", tx + 0.5, ty + 0.5, cb)
@@ -276,7 +285,28 @@ class Blueprint:
             e = left.pop(k)
             dist, near = best[k]
             if dist > reach * reach:
-                raise ValueError(f"substation at {pos(e)} is {dist ** 0.5:.1f} tiles from the nearest one (max {reach})")
+                # A substation in between (at the free spot nearest the midpoint) bridges the gap.
+                occ = self.occupied()
+                mx, my = (pos(e)[0] + pos(near)[0]) / 2 - 1, (pos(e)[1] + pos(near)[1]) / 2 - 1
+                spot = None
+                for r in range(0, 12):
+                    for dx in range(-r, r + 1):
+                        for dy in range(-r, r + 1):
+                            x, y = int(mx) + dx, int(my) + dy
+                            if max(abs(dx), abs(dy)) == r and not {(x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1)} & occ:
+                                c = (x + 1, y + 1)
+                                if max((c[0] - pos(a)[0]) ** 2 + (c[1] - pos(a)[1]) ** 2 for a in (e, near)) <= reach * reach:
+                                    spot = (x, y)
+                                    break
+                        if spot:
+                            break
+                    if spot:
+                        break
+                if spot is None:
+                    raise ValueError(f"substation at {pos(e)} is {dist ** 0.5:.1f} tiles from the nearest one (max {reach})")
+                mid = self.entities[self.substation(*spot) - 1]
+                self.wire(near["entity_number"], COPPER, mid["entity_number"], COPPER)
+                near = mid
             self.wire(near["entity_number"], COPPER, e["entity_number"], COPPER)
             for k2, e2 in left.items():
                 if d2(e, e2) < best[k2][0]:

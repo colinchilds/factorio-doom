@@ -234,7 +234,7 @@ def run(args, binary, ap):
         return
     if args.signals:
         sigs = json.loads((OUTPUT / "signals.json").read_text())
-        dest = ROOT / "conformance" / "signal_order.json"
+        dest = ROOT / "conformance" / ("signal_order_dlc.json" if args.dlc else "signal_order.json")
         dest.write_text("[\n" + ",\n".join(json.dumps(x) for x in sigs) + "\n]\n")
         print(f"{len(sigs)} signals -> {dest}")
         return

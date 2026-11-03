@@ -194,6 +194,16 @@ class Graph:
     def decider(self, conds, outs, else_outs=None, red=(), green=(), label=""):
         return self.op("decider", sem.decider_spec(conds, outs, else_outs), _l(red), _l(green), label)
 
+    def requality(self, a, quality, label=""):
+        """Every lane of a (red) moved to `quality` (a selector's quality transfer, Space Age)."""
+        return self.op("selector", sem.quality_transfer(quality), _l(a), [], label or f"to {quality}")
+
+    def spread(self, a, qualities, label=""):
+        """a's lanes copied onto every quality in `qualities` (normal first), one tick later: one
+        quality transfer per quality (normal included: a delay alone would do, but the selector
+        keeps every copy alike). The copies share a network (a Collect)."""
+        return Collect([self.requality(a, q, f"{label or a.label} @{q}") for q in qualities])
+
     # -- evaluation ----------------------------------------------------------------------------
 
     def evaluate(self, T, want, inputs=None):
@@ -228,7 +238,10 @@ class Graph:
             elif n.kind == "ext":
                 r = dict(inputs.get(n.id, {}))
             else:
-                r = sem.evaluate(n.kind, n.spec, total(_flat(n.red)), total(_flat(n.green)), scratch)
+                # A node may read a network on a wire its spec ignores (n.nominal: "green"), only so
+                # the network runs through it; that input isn't evaluated (it may even be later).
+                green = [] if getattr(n, "nominal", None) == "green" else _flat(n.green)
+                r = sem.evaluate(n.kind, n.spec, total(_flat(n.red)), total(green), scratch)
             cache[n.id] = r
             return r
 
@@ -255,19 +268,27 @@ class Graph:
             n.green = [m for x in n.green for m in (x.nodes if isinstance(x, Collect) else [x])]
 
     def _split_constants(self):
-        """Every consumer input gets its own constant combinator, placed next to it."""
+        """Every input network gets its own constant combinator, placed next to a consumer:
+        consumers reading the same sources on the same color (one network) share it. A lone
+        constant the caller placed (fixed) is kept as it is."""
+        made = {}
         for n in list(self.nodes):
             for attr in ("red", "green"):
                 lst = getattr(n, attr)
                 consts = [s for s in lst if s.kind == "const"]
-                if consts:
+                if not consts:
+                    continue
+                if len(consts) == 1 and consts[0].fixed:
+                    continue
+                k = (attr, frozenset(s.id for s in lst))
+                if k not in made:
                     merged = {}
                     for c in consts:
                         for s, v in c.spec:
-                            k = sem.key(s)
-                            merged[k] = (s, sem.i32(merged.get(k, (s, 0))[1] + v))
-                    c = Node(self, "const", [sv for sv in merged.values() if sv[1]], label="const")
-                    setattr(n, attr, [s for s in lst if s.kind != "const"] + [c])
+                            kk = sem.key(s)
+                            merged[kk] = (s, sem.i32(merged.get(kk, (s, 0))[1] + v))
+                    made[k] = Node(self, "const", [sv for sv in merged.values() if sv[1]], label="const")
+                setattr(n, attr, [s for s in lst if s.kind != "const"] + [made[k]])
         # Drop the original (now unused) constants.
         used = {s.id for n in self.nodes for s in n.red + n.green}
         self.nodes = [n for n in self.nodes if n.kind != "const" or n.id in used]
@@ -298,6 +319,7 @@ class Graph:
             if s.kind in ("clock", "ext"):
                 raise ValueError(f"{s.kind} {s.label} can feed only one network per color")
             dup = Node(self, s.kind, s.spec, s.red, s.green, time=s.time, label=s.label + " dup")
+            dup.orig = s
             lst = getattr(n, color)
             setattr(n, color, [dup if x is s else x for x in lst])
             # Every consumer that reads exactly this source set on this color shares the dup.
@@ -328,7 +350,7 @@ class Collect:
     def __init__(self, nodes):
         self.nodes = nodes
         self.id = next(Collect._ids)
-        ts = {n.time for n in nodes}
+        ts = {n.time for n in nodes if n.time is not None}   # constants (no time) may join a wire
         assert len(ts) == 1
         self.time = ts.pop()
         self.kind = "collect"
@@ -393,6 +415,15 @@ def _place(g, nets, blocked, region, x_right):
     for n in g.nodes:
         if n.fixed:
             take(n)
+    # Copies of a placed node go right next to it.
+    for n in g.nodes:
+        o = getattr(n, "orig", None)
+        if not n.fixed and o is not None and o.fixed:
+            x0, y0 = o.pos
+            spot = next((x0 + dx, y0 + dy) for r in range(1, 60) for dx in range(-2 * r, 2 * r + 1) for dy in range(-r, r + 1)
+                        if max(abs(dx) // 2, abs(dy)) == r and free(n, (x0 + dx, y0 + dy)))
+            n.fixed, n.pos = True, spot
+            take(n)
     consumers = {n.id: [] for n in g.nodes}
     for net in nets.values():
         for s in net["src"]:
@@ -411,11 +442,21 @@ def _place(g, nets, blocked, region, x_right):
             if not ys:
                 raise ValueError(f"{n} has no placed consumer")
             want[n.id] = sum(ys) / len(ys)
-        y = None
-        for n in sorted(col, key=lambda n: want[n.id]):
-            y = round(want[n.id]) if y is None else max(round(want[n.id]), y + 1)
-            while not free(n, (x, y)):
-                y += 1
+        # One row per node, in the order of their wanted rows, as close to them as possible: the
+        # stack centers on a cluster instead of piling up below it (isotonic regression of
+        # want_i - i, pool adjacent violators), then each node takes the nearest free tile.
+        order = sorted(col, key=lambda n: want[n.id])
+        blocks = []   # [mean, count]
+        for i, n in enumerate(order):
+            blocks.append([want[n.id] - i, 1])
+            while len(blocks) > 1 and blocks[-2][0] > blocks[-1][0]:
+                m2, c2 = blocks.pop()
+                m1, c1 = blocks.pop()
+                blocks.append([(m1 * c1 + m2 * c2) / (c1 + c2), c1 + c2])
+        ys = [m + i for i, m in enumerate(m for m, c in blocks for _ in range(c))]
+        for n, yw in zip(order, ys):
+            y0 = round(yw)
+            y = next(y0 + d for a in range(0, 1000) for d in ((a, -a) if a else (0,)) if free(n, (x, y0 + d)))
             n.pos = (x, y)
             take(n)
     for n in g.nodes:
@@ -462,6 +503,9 @@ def _emit(g, b):
             ent[n.id] = (e, e)
         elif n.kind == "decider":
             e = b._add("decider-combinator", x + 1, y + 0.5, {"decider_conditions": n.spec}, direction=4)
+            ent[n.id] = (e, e)
+        elif n.kind == "selector":
+            e = b._add("selector-combinator", x + 1, y + 0.5, dict(n.spec), direction=4)
             ent[n.id] = (e, e)
         else:
             raise ValueError(n.kind)
@@ -550,14 +594,17 @@ def _relay_search(a_fp, a_pole, c_fp, c_pole, usable, taken, reaches):
     raise ValueError(f"can't route a wire from {a_fp} to {c_fp}")
 
 
-def _mst(fps, boxed=()):
+def _mst(fps, boxed=(), joined=()):
     """Minimum spanning tree over footprint gaps: [(gap, i, j)], each edge joining node i to the
     tree through j. Prim's for small nets; for big ones Kruskal over the pairs in neighboring grid
     cells, with coarser cells until everything is joined. Edges longer than REACH touching a boxed
     member (no room for a relay pole next to it) cost extra, so they're used only as a last resort."""
     n = len(fps)
+    joined = set(joined)   # members already connected to each other (free edges, not wired)
 
     def cost(i, j):
+        if i in joined and j in joined:
+            return 0
         d = gap(fps[i], fps[j])
         return d + 1e6 if d > REACH and (i in boxed or j in boxed) else d
     if n <= 120:
@@ -585,6 +632,14 @@ def _mst(fps, boxed=()):
         for i, f in enumerate(fps):
             cells.setdefault((int(f[0] // size), int(f[1] // size)), []).append(i)
         cand = []
+        if joined and size == 3:   # join them first
+            js = sorted(joined)
+            for a in js[1:]:
+                ra, rb = find(a), find(js[0])
+                if ra != rb:
+                    parent[ra] = rb
+                    edges.append((0, js[0], a))
+                    comps -= 1
         for (cx, cy), idx in cells.items():
             for dx in (-1, 0, 1):
                 for dy in (-1, 0, 1):
@@ -611,6 +666,7 @@ def _mst(fps, boxed=()):
 
 
 def _wire(g, nets, b, ent, usable):
+    g.relay_stats = {}
     taken = b.occupied()
     relays = 0
     for net in nets.values():
@@ -626,7 +682,19 @@ def _wire(g, nets, b, ent, usable):
         for d in net["dst"]:
             members.append((d, RED_IN if color == "red" else GREEN_IN))
         fps = [footprint(n) for n, _ in members]
-        edges = _mst(fps)
+        # An ext source with taps (other entities on its network, e.g. a row of substations
+        # chained to it): any of them may join the network.
+        joined = []
+        for s in net["src"]:
+            if s.kind == "ext" and s.spec.get("taps"):
+                joined.append(next(i for i, (m, _) in enumerate(members) if m is s))
+                for ent_id, pos, size in s.spec["taps"]:
+                    t = Node.__new__(Node)
+                    t.kind, t.spec, t.pos, t.id, t.label = "ext", {"entity": ent_id, "size": size, "connectors": s.spec["connectors"]}, pos, None, "tap"
+                    joined.append(len(members))
+                    members.append((t, s.spec["connectors"][0 if color == "red" else 1]))
+                    fps.append(footprint(t))
+        edges = [e for e in _mst(fps, joined=joined) if not (e[1] in joined and e[2] in joined)]
         # A long edge needs a relay pole within reach of each end. Members boxed in (inside a
         # packed block) can't take one: if the tree uses such an edge, rebuild it with those
         # members joined only within reach, so the net enters the block where there is room.
@@ -640,17 +708,21 @@ def _wire(g, nets, b, ent, usable):
                 if not new:
                     break
                 boxed |= new
-                edges = _mst(fps, boxed)
+                edges = [e for e in _mst(fps, boxed, joined) if not (e[1] in joined and e[2] in joined)]
         for dist, j, i in edges:
             (a, ca), (c, cc) = members[j], members[i]
-            a_end = (ent[a.id][1 if ca in (RED_OUT, GREEN_OUT) else 0], ca)
-            c_end = (ent[c.id][1 if cc in (RED_OUT, GREEN_OUT) else 0], cc)
+            ea = ent[a.id] if a.id is not None else (a.spec["entity"],) * 2
+            ec = ent[c.id] if c.id is not None else (c.spec["entity"],) * 2
+            a_end = (ea[1 if ca in (RED_OUT, GREEN_OUT) else 0], ca)
+            c_end = (ec[1 if cc in (RED_OUT, GREEN_OUT) else 0], cc)
             if dist > REACH:
                 n0 = len(b.entities)
                 is_pole = lambda n: n.kind == "ext" and b.is_pole(n.spec["entity"])  # noqa: E731
                 _relay(b, fps[j], a_end, fps[i], c_end, 1 if color == "red" else 2, usable, taken,
                        is_pole(a), is_pole(c))
                 relays += len(b.entities) - n0
+                k = f"{net['color']} {net['src'][0].label}"
+                g.relay_stats[k] = g.relay_stats.get(k, 0) + len(b.entities) - n0
             else:
                 b.wire(*a_end, *c_end)
     g.relays = relays

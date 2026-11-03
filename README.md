@@ -1,7 +1,7 @@
 # factorio-doom
 
-Groundwork for a Doom-style first-person shooter built from vanilla Factorio 2.1 combinators and
-shown on a lamp screen. See [CLAUDE.md](CLAUDE.md) for the goal, the planned design, and status.
+A Doom-style first-person shooter built from Factorio 2.1 combinators (no mods; Space Age for
+signal quality, which the screen uses: six rows per network) and shown on a lamp screen. See [CLAUDE.md](CLAUDE.md) for the goal, the planned design, and status.
 
 The tools so far:
 
@@ -19,8 +19,9 @@ The tools so far:
 - **Sprite demo** (`demos/sprite.py`): a Freedoom monster (BSD-licensed art, `assets/freedoom/`)
   walking toward the camera, drawn by combinators at any `--size`. The `.txt` file it writes is a
   blueprint string to paste into the game.
-- **Raycaster** (`demos/raycast.py`): M3, Freedoom-textured walls, floors and ceilings rendered
-  entirely by combinators at any `--size` (about 13,000 at 160×100), built with the netlist compiler
+- **Raycaster** (`demos/raycast.py`): Freedoom-textured walls, floors and ceilings rendered
+  entirely by combinators at any `--size` (about 7,600 at 160×100), six screen rows per network
+  (one per signal quality, so it needs Space Age), built with the netlist compiler
   (`compiler/`), which balances latency, places and wires the circuit, and evaluates it as the
   reference.
 - **The game** (`demos/game.py`): the raycaster driven by a chest input pad (god mode, drop
@@ -28,7 +29,9 @@ The tools so far:
   and items stand on the map (`demos/things.py`), hidden behind nearer walls; monsters are solid
   and hurt you up close, items are picked up (`demos/touch.py`). A Freedoom status bar (`demos/hud.py`) shows
   ammo, health, armor and the face. Seven Freedoom weapons (`demos/weapons.py`): the gun in front
-  of the view, "next weapon" switches, fire plays Doom's animation and uses ammo.
+  of the view, "next weapon" switches, fire plays Doom's animation and uses ammo. Shots hit the
+  nearest live monster in the middle of the view (`demos/combat.py`), which flinches with its
+  pain frame and dies with Freedoom's death animation, leaving a corpse.
 - **Demos** (`demos/`): `gradient.py` builds a 16×16 lamp screen laid out like the planned
   renderer's row stage. fsim and the game agree on it lamp for lamp.
 
@@ -46,9 +49,12 @@ cargo test --release                              # fsim vs. the golden game rec
 ./target/release/fsim decode some.bp              # blueprint string -> JSON
 
 # Conformance against the real game (needs Factorio 2.1 installed)
-python3 conformance/gen.py                        # regenerate conformance/cases/*.json
+python3 conformance/gen.py                        # regenerate conformance/cases/*.json (and cases_dlc/)
 python3 harness/run.py conformance/cases -o conformance/game_dump.json   # ~2 s
 ./target/release/fsim conform                     # every case must PASS
+# Space Age cases (quality selectors, quality pole reach): run with the DLC
+python3 harness/run.py --dlc conformance/cases_dlc -o conformance/game_dump_dlc.json
+./target/release/fsim conform conformance/cases_dlc --dump conformance/game_dump_dlc.json
 
 # Any blueprint can be checked the same way
 python3 harness/run.py demos/gradient.json -o demos/golden/gradient_dump.json
@@ -65,13 +71,12 @@ python3 demos/raycast.py --size 160x100 --flat 0   # untextured floor/ceiling (c
 python3 demos/game.py --size 320x200 --gamma 0.4 --fog 12   # brighter screen (--gamma 1 --saturation 1 --fog 4: Freedoom's colors)
 python3 demos/raycast.py --size 160x100 --no-things   # without the monsters and items (also game.py)
 python3 demos/game.py --size 160x100 --no-hud      # without the status bar: the view takes the whole screen
-python3 demos/game.py --size 160x100 --no-weapon   # without the weapon (and its compositor: one tick less)
+python3 demos/game.py --size 160x100 --no-weapon   # without the weapon in front of the view
 python3 demos/weapons.py                           # weapon timelines and the overlay's cost per size
 python3 demos/game.py --size 160x100 --turn-slow 1 --turn 4 --turn-ramp 18   # turning: per tick, slow then fast
 python3 harness/run.py --warmup 60 out/dir -o dump.json   # deep pipelines: settle before t0
-# Substations default to legendary (28x28 supply, fewer dead pixels). Game checks without the
-# DLC need normal ones; with the DLC: harness/run.py --dlc --bench 30 demos/gen/raycast_160x100.json
-python3 demos/raycast.py --size 64x40 --substation-quality normal
+# Substations default to legendary (28x28 supply, fewer dead pixels). The screen needs Space Age
+# (quality lanes), so game checks run with --dlc: harness/run.py --dlc --bench 30 demos/gen/raycast_160x100.json
 
 # Input pad (god mode, drop items with Z): check the decoder against its reference model
 python3 demos/input_pad.py --size 320x200 --verify   # -> demos/gen/input_pad_n9.{json,txt}

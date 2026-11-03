@@ -19,14 +19,15 @@ Two min trees over the things (absent lanes lose) give per column Zt (the key: u
 depth first) and Dt (depth and frame). Then:
     SK = Zt AND (2^KB - 1), FR = Dt AND 63 -> lookups per (frame, u): a mask word (bit 31 - t:
         texel row t is opaque) and HP / 8 texel words (8 texels each, like the wall strips)
-    row y (r = 2y + 1 - H > 0), texel row t = Vs >> 2 with Vs = Dt / cs_y = 4 STEX z:
+    row y (r = 2y + 1 - H > 0), texel row t = Vs >> 2 with Vs = Dt / cs_y = 4 STEX z (per chunk of
+    rows in raycast.build_graph, cs_y a constant vector over its lanes):
       kill   Q = Dt / (4 cs_y), P = 2^Q (0 once Q >= 32), OM = mask * P: the sign is row t's opacity.
              OM < 0 and the wall farther than the thing (D - Dt / 512 > 0) -> 2^29 onto the wall's
-             V, which then misses every wall mux and the bounded bg: the wall and flat output nothing.
+             V, which then misses every wall mux and the bounded flat select: nothing else shows.
       texel  Vs, a mux per word, a shift, and one palette decider per color copying that color
              times the thing's brightness on columns where it is in front of the wall.
-The kill has to reach V's network with V (the split + 1), so the thing path is timed backwards from
-there: trees out 4 ticks before V. Up to 8 things fit (3 tree levels).
+The kill has to reach V's network with V, so the thing path is timed backwards from there: trees
+out 4 ticks before V (t_v; the chunks' quality spread adds one). Up to 8 things fit (3 levels).
 """
 import json
 import math
@@ -141,11 +142,14 @@ def mul(g, a, table, out, label):
                 green=[table.node], label=label)
 
 
-def tree(g, level, name):
-    """Lane-wise min over the leaves; absent lanes (0) lose."""
+def tree(g, level, name, levels=None):
+    """Lane-wise min over the leaves; absent lanes (0) lose. levels: a list to record each level's
+    nodes in (for the layout)."""
     depth = 0
     while len(level) > 1:
         nxt = []
+        if levels is not None:
+            levels.append(nxt)
         for i, (a, b) in enumerate(zip(level[::2], level[1::2])):
             conds = [sem.cond(EACH, "<", EACH, RED, None, GREEN), sem.cond(EACH, "!=", 0, RED, "and"),
                      sem.cond(EACH, "=", 0, GREEN, "or")]
@@ -156,14 +160,19 @@ def tree(g, level, name):
     return level[0]
 
 
-def column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_v, shade, hide=None):
+def column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_v, shade, hide=None, frame=None):
     """The per-thing scalars, the per-column key/depth vectors and the lookup blocks. Returns a dict
-    of nodes for the row stage (all timed against t_v, the wall V's time).
+    of nodes for the row stage (all timed against t_v, the wall V's time), and each thing's depth
+    and lateral offset ("alpha", "lat": Scalars) for the aim (combat.py).
+
+    frame(g, i, fid): a Scalar added to thing i's frame id (fid: name -> id), or None for its
+    THINGS frame throughout (a monster's pain and death frames, combat.py).
 
     hide(g, i, out): a Scalar adding HIDE (or 0) to thing i's depth signal `out`, or None. A hidden
     thing's depth is behind the camera, so neither leaf passes and it isn't drawn (a picked-up
     item). |alpha| < 2^23 on a 16-tile map, so alpha - 2^23 stays negative, and its Zt base
-    (alpha >> QD) << KB stays above -2^31 for KB <= 17."""
+    (alpha >> qd) << KB stays above -2^31 with qd = QD for KB <= 17; wider boxes (a dying imp's)
+    take one bit of Zt's depth per extra key bit (qd = QD + KB - 17)."""
     if len(things) > 8:
         raise ValueError(f"{len(things)} things: at most 8 fit in the latency budget")
     X0, Y0, (ox, oy) = pos0
@@ -173,9 +182,8 @@ def column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_v, shade,
     fid = {f["name"]: i + 1 for i, f in enumerate(sprites["frames"])}
     types = sprites["types"]
     KB = key_bits(types)
-    if hide and KB > 17:
-        raise ValueError(f"key bits {KB}: a hidden thing's Zt base would overflow")
-    zleaves, dleaves = [], []
+    qd = QD + max(0, KB - 17) if hide else QD
+    zleaves, dleaves, alphas, lats, rows = [], [], [], [], []
     for i, (tx, ty, name) in enumerate(things):
         ex, ey = int(tx * 256), int(ty * 256)
         rx = g.ss(ex - ox, "-", X0, f"rx{i}")
@@ -189,21 +197,28 @@ def column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_v, shade,
             parts.append(g.delay(hid.node, parts[0].time - hid.node.time))
         alpha = Scalar(Collect(parts), sa)
         lat = Scalar(Collect([mul(g, ry, DX, sl, f"l{i}x"), mul(g, rx, NDY, sl, f"l{i}y")]), sl)
+        alphas.append(alpha)
+        lats.append(lat)
         sigma = g.ss(alpha, "/", DIV_SIGMA, f"sigma{i}")
-        dc = g.ss(alpha, ">>", QD, f"dc{i}")
+        dc = g.ss(alpha, ">>", qd, f"dc{i}")
         U = [g.vs(vec(camx, "camx"), "*", sigma, f"u{i}"), g.vs(vec([-1] * w, "-1"), "*", lat, f"lat{i}")]
         ZB = g.vs(vec([1 << KB] * w, "2^KB"), "*", dc, f"zb{i}")
         DB = g.vs(vec([1 << FRAME_BITS] * w, "64"), "*", alpha, f"db{i}")
         texw = types[name[:4]]
         C = (texw // 2 + 1) << F
         rng = [sem.cond(EACH, ">=", -(texw // 2) << F, RED), sem.cond(EACH, "<", (texw // 2) << F, RED, "and")]
-        zleaves.append(g.decider(rng + [sem.cond(EACH, ">=", (NEAR >> QD) << KB, GREEN, "and")],
+        zleaves.append(g.decider(rng + [sem.cond(EACH, ">=", (NEAR >> qd) << KB, GREEN, "and")],
                                  [sem.out(EACH, constant=C), sem.out(EACH, networks=RED), sem.out(EACH, networks=GREEN)],
                                  red=U, green=ZB, label=f"zt{i}"))
+        fo = frame(g, i, fid) if frame else None
+        DF = [DB, g.broadcast(vec([1] * w, "ones"), fo, f"frame{i}")] if fo else DB
         dleaves.append(g.decider(rng + [sem.cond(EACH, ">=", NEAR << FRAME_BITS, GREEN, "and")],
                                  [sem.out(EACH, constant=fid[name]), sem.out(EACH, networks=GREEN)],
-                                 red=U, green=DB, label=f"dt{i}"))
-    Zt, Dt = tree(g, zleaves, "zmin"), tree(g, dleaves, "dmin")
+                                 red=U, green=DF, label=f"dt{i}"))
+        rows.append([rx.node, ry.node] + parts[:2] + lat.node.nodes + ([hid.node] if hid is not None else [])
+                    + [sigma.node, dc.node] + U + [ZB, DB] + (DF[1:] if fo else []) + [zleaves[-1], dleaves[-1]])
+    tz, td = [], []
+    Zt, Dt = tree(g, zleaves, "zmin", tz), tree(g, dleaves, "dmin", td)
     at = t_v - 4
     if Zt.time > at or Dt.time > at:
         raise ValueError(f"thing path too long: trees at {max(Zt.time, Dt.time)}, needed by {at}")
@@ -232,72 +247,8 @@ def column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_v, shade,
     # Brightness where the thing is in front of the wall: VB at V's time, colors one tick later.
     BRS = g.vv(vec([shade.bright] * w, "bright"), "/", [SD, vec([shade.fog] * w, "fog")], "thing brightness")
     return {"Zt": Zt, "Dt": Dt, "SK": SK, "FR": FR, "NSD": NSD, "BRS": BRS, "masks": masks, "words": words,
-            "wsum": wsum, "lookups": masks + [n for ws in words for n in ws], "KB": KB}
-
-
-def visible(g, MV, MH, col):
-    """DD = D - thing depth (green network): > 0 where the thing is in front of the wall."""
-    NSD = g.delay(col["NSD"], MV.time - col["NSD"].time)
-    return [MV, MH, NSD]
-
-
-def colors_bus(g, DD, col, sprites, t_v):
-    """Per thing color c: color times brightness on columns where the thing is in front, at V + 1
-    (the palette deciders read it at the shift's time)."""
-    BRS = g.delay(col["BRS"], t_v - 1 - col["BRS"].time)
-    VB = g.decider([sem.cond(EACH, ">", 0, GREEN)], [sem.out(EACH, networks=RED)], red=BRS, green=DD, label="thing visible")
-    return {c: g.vc(VB, "*", color(c4, 1), f"thing color{c}") for c, c4 in enumerate(sprites["colors"], 1)}
-
-
-def row_kill(g, y, h, col, DD, proj=None):
-    """The kill path of row y: 2^29 where the thing's texel here is opaque and it is in front."""
-    cs = row_divisor(y, h, proj)
-    Q = g.vc(col["Dt"], "/", 4 * cs, f"tq{y}")
-    P = g.op("arith", sem.arith_spec(2, "^", EACH, EACH, None, RED), red=[Q], label=f"tp{y}")
-    OM = g.vv(col["masks"], "*", P, f"tom{y}")
-    kill = g.decider([sem.cond(EACH, "<", 0, RED), sem.cond(EACH, ">", 0, GREEN, "and")], [sem.out(EACH, constant=KILL)],
-                     red=OM, green=DD, label=f"kill{y}")
-    return {"sq": Q, "sp": P, "som": OM, "kill": kill}
-
-
-def row_texels(g, y, h, col, SC, wbus, proj=None):
-    """The texel path of row y: Vs, a mux per word, a shift, a palette decider per color."""
-    Dt = g.delay(col["Dt"], wbus[0].time - 1 - col["Dt"].time)
-    Vs = g.vc(Dt, "/", row_divisor(y, h, proj), f"tv{y}")
-    mux = [g.decider([sem.cond(EACH, "!=", 0, GREEN), sem.cond(EACH, ">=", 32 * j, RED, "and"),
-                      sem.cond(EACH, "<", 32 * j + 32, RED, "and")], [sem.out(EACH, networks=GREEN)],
-                     red=Vs, green=wbus[j], label=f"tmux{y}.{j}") for j in range(HP // 8)]
-    S = g.vc(Vs, "AND", 28, f"tnib{y}")
-    T = g.vv(mux, "<<", S, f"ttexel{y}")
-    from raycast import nibble_range  # noqa: E402
-    pals = {c: g.decider(nibble_range(c), [sem.out(EACH, networks=GREEN)], red=T, green=SC[c], label=f"tpal{y}.{c}")
-            for c in SC}
-    node = {"svs": Vs, "sss": S, "sst": T, **{f"smux{j}": m for j, m in enumerate(mux)},
-            **{f"spal{c}": p for c, p in pals.items()}}
-    return node, list(pals.values())
-
-
-def slots_kill():
-    return ["sq", "sp", "som", "kill"]
-
-
-def palette_run(pals, ncolors):
-    """The wall palette slots (pals, left to right) with the thing palettes and texel path woven
-    in: wall palette k, thing palette k, then up to two texel nodes. Rows without things leave
-    those slots empty, and their palette chain still reaches (at most 3 empty slots between)."""
-    sp = [f"spal{c}" for c in range(1, ncolors + 1)]
-    extra = [["smux0", "svs"], ["smux1", "sst"], ["smux2", "sss"], ["smux3"]]
-    run = []
-    for k in range(max(len(pals), len(sp))):
-        run += pals[k:k + 1] + sp[k:k + 1] + (extra[k] if k < len(extra) else [])
-    return run
-
-
-def nets(ncolors):
-    sp = [f"spal{c}" for c in range(1, ncolors + 1)]
-    mux = [f"smux{j}" for j in range(HP // 8)]
-    return [["sq", "sp"], ["sp", "som"], ["som", "kill"], ["kill", "v"], ["svs", "sss"] + mux, mux + ["sst"], ["sss", "sst"],
-            ["sst"] + sp]
+            "wsum": wsum, "lookups": masks + [n for ws in words for n in ws], "KB": KB, "alpha": alphas, "lat": lats,
+            "rows": rows, "trees": (tz, td), "tail": [Zt, Dt, SK, FR, NSD, SD], "tables": [DX, DY, NDY]}
 
 
 # ---------------------------------------------------------------------------------------------

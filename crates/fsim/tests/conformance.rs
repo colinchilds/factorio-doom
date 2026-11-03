@@ -23,3 +23,8 @@ fn conformance_cases_match_game() {
 fn gradient_demo_matches_game() {
     check("demos", "demos/golden/gradient_dump.json");
 }
+
+#[test]
+fn space_age_cases_match_game() {
+    check("conformance/cases_dlc", "conformance/game_dump_dlc.json");
+}

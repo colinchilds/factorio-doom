@@ -69,8 +69,13 @@ impl Sim {
                 continue; // copper
             }
             let (ea, eb) = (&model.entities[a], &model.entities[b]);
+            if w[1] % 2 != w[3] % 2 {
+                // Red (1, 3) to green (2, 4): no such wire exists in the game.
+                dropped.push(format!("wire #{} -> #{} joins a red connector to a green one; the game drops it", ea.number, eb.number));
+                continue;
+            }
             let dist = footprint_gap(ea, eb);
-            let reach = wire_reach(&ea.name).min(wire_reach(&eb.name));
+            let reach = wire_reach(&ea.name, &ea.quality).min(wire_reach(&eb.name, &eb.quality));
             if dist > reach + 1e-9 {
                 // The game silently refuses to build wires longer than the shorter reach.
                 dropped.push(format!(
@@ -267,9 +272,17 @@ pub fn is_pole(name: &str) -> bool {
     matches!(name, "small-electric-pole" | "medium-electric-pole" | "big-electric-pole" | "substation")
 }
 
-/// Circuit wire reach in tiles (normal quality), from the base game prototypes. A wire's reach is
-/// the shorter of its two ends' (verified: a big pole can't reach a constant combinator 11 away).
-pub fn wire_reach(name: &str) -> f64 {
+/// Circuit wire reach in tiles, from the base game prototypes; poles at other qualities from
+/// `conformance/pole_quality.json` (measured in Space Age). A wire's reach is the shorter of its
+/// two ends' (verified: a big pole can't reach a constant combinator 11 away).
+pub fn wire_reach(name: &str, quality: &str) -> f64 {
+    if quality != "normal" && is_pole(name) {
+        static TABLE: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+        let t = TABLE.get_or_init(|| serde_json::from_str(include_str!("../../../conformance/pole_quality.json")).unwrap());
+        if let Some(r) = t.pointer(&format!("/{name}/{quality}/max_circuit_wire_distance")).and_then(|v| v.as_f64()) {
+            return r;
+        }
+    }
     match name {
         "small-electric-pole" => 7.5,
         "medium-electric-pole" => 9.0,
@@ -516,6 +529,18 @@ pub fn eval_selector(s: &Selector, red: &SigVec, green: &SigVec, game_tick: i64)
         }
         Selector::Count(Some(id)) if !input.is_empty() => vec![(*id, input.len() as i32)],
         Selector::Time { game_tick: Some(id) } if game_tick as i32 != 0 => vec![(*id, game_tick as i32)],
+        Selector::QualityTransfer { map, .. } => {
+            let mut acc = crate::signals::Accum::default();
+            for &(id, v) in &input {
+                if let Some(&to) = map.get(id as usize) {
+                    acc.add(to, v);
+                }
+            }
+            acc.finish()
+        }
+        Selector::QualityFilter { keep, .. } => {
+            input.iter().copied().filter(|&(id, _)| keep.get(id as usize).copied().unwrap_or(false)).collect()
+        }
         _ => SigVec::new(),
     }
 }

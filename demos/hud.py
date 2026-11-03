@@ -252,11 +252,12 @@ class Hud:
 
     # -- circuit --------------------------------------------------------------------------------
 
-    def build(self, g, hs, sigs, cols, t_out, y0, xs):
-        """The bar's deciders in graph g. hs: a node whose output holds the values (sigs: {key:
-        signal}); t_out: the tick the rows must land on (the view rows'); rows y0.. of the screen,
-        deciders fixed at x = xs[0], xs[1], ... (right to left) in their row. Returns the rows
-        (Collect, or None for a row with no slot pixels)."""
+    def build_chunks(self, g, hs, sigs, lane, t_out, chunks):
+        """The bar's deciders in graph g, for screen chunks [(y0, n)] covering the bar's rows (the
+        bar starts at chunks[0][0]); lane(x, q) is column x's signal on a chunk's row q. Per (slot,
+        glyph, chunk) one decider outputs the glyph's deltas on its lanes. Returns (outputs (Collect
+        or None per chunk), units ({role: node} per chunk), static colors ([(signal, value)] per
+        chunk))."""
         lag = t_out - 2 - hs.time
         if lag < 0:
             raise ValueError("HUD input arrives too late for the view rows")
@@ -264,17 +265,18 @@ class Hud:
         N = g.delay(HS, 1)
         M100 = g.vc(HS, "%", 100, "hud n%100")
         M10 = g.vc(HS, "%", 10, "hud n%10")
-        rows = []
-        self.nodes = []
-        for yb in range(self.hb):
+        base_y = chunks[0][0]
+        outs, units, statics = [], [], []
+        for y0, n in chunks:
+            ybs = range(y0 - base_y, y0 - base_y + n)
             groups = {"face": [], 100: [], 10: [], 1: []}
             for i, s in enumerate(self.slots):
                 S = sigs[s["key"]]
                 for gl in s["glyphs"]:
-                    d = sorted((x, v) for (x, y), v in self.deltas[i, gl].items() if y == yb)
+                    d = sorted((y, x, v) for (x, y), v in self.deltas[i, gl].items() if y in ybs)
                     if not d:
                         continue
-                    outs = [sem.out(cols[x], constant=v) for x, v in d]
+                    o = [sem.out(lane(x, y + base_y - y0), constant=v) for y, x, v in d]
                     green = []
                     p = s["place"]
                     if p == "face":
@@ -292,17 +294,14 @@ class Hud:
                         red, green = M100, [N]
                     else:
                         conds, red = [sem.cond(S, "=", gl, RED)], M10
-                    n = g.decider(conds, outs, red=red, green=green, label=f"hud{yb}.{s['key']}.{p}.{gl}")
-                    groups[p].append(n)
-            # Grouped by input network, so each network's members line up across rows.
+                    groups[p].append(g.decider(conds, o, red=red, green=green, label=f"hud{y0}.{s['key']}.{p}.{gl}"))
+            # Grouped by input network, so each network's members line up across chunks.
             nodes = groups["face"] + groups[100] + groups[10] + groups[1]
-            if len(nodes) > len(xs):
-                raise ValueError(f"HUD row needs {len(nodes)} slots, {len(xs)} given")
-            for n, x in zip(nodes, xs):
-                n.fixed, n.pos = True, (x, y0 + yb)
-            self.nodes.append(nodes)
-            rows.append(Collect(nodes) if nodes else None)
-        return rows
+            units.append({f"hud{i}": nd for i, nd in enumerate(nodes)})
+            outs.append(Collect(nodes) if nodes else None)
+            statics.append([(lane(x, q), self.bg[y0 - base_y + q][x]) for q in range(n) for x in range(self.w)
+                            if self.bg[y0 - base_y + q][x]])
+        return outs, units, statics
 
     def width(self):
         """Deciders in the busiest row (slots needed left of the screen)."""
