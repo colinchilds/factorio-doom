@@ -176,8 +176,29 @@ impl Sim {
         Ok(())
     }
 
+    /// Sets one signal of a constant combinator to `count` (0 removes it), as a script rewriting
+    /// its section would: networks see it from the next `step` (`constant_script`). Names
+    /// starting with "signal-" are virtual signals, others items.
+    pub fn set_constant(&mut self, e: usize, name: &str, count: i32) -> Result<(), String> {
+        let typ = if name.starts_with("signal-") { "virtual" } else { "item" };
+        let id = self.model.signals.intern(crate::signals::SignalKey::new(typ, name, "normal"));
+        let ent = &mut self.model.entities[e];
+        let Behavior::Constant { out, enabled } = &mut ent.behavior else {
+            return Err(format!("entity #{} ({}) is not a constant combinator", ent.number, ent.name));
+        };
+        let old = get(out, id);
+        *out = add(out, &vec![(id, count - old)]);
+        let on = *enabled;
+        if on {
+            let have = get(&self.outputs[e], id);
+            self.outputs[e] = add(&self.outputs[e], &vec![(id, count - have)]);
+        }
+        Ok(())
+    }
+
     /// Applies the inserts scheduled for simulation tick `t` (a list of [t, entity_number, item,
-    /// count], the format of a case's `fsim.inserts` and of `fsim run --input`).
+    /// count], the format of a case's `fsim.inserts` and of `fsim run --input`). On a constant
+    /// combinator an entry sets that signal instead (`set_constant`).
     pub fn apply_inserts(&mut self, schedule: &serde_json::Value, t: i64) -> anyhow::Result<()> {
         for ins in schedule.as_array().into_iter().flatten() {
             let a = ins.as_array().ok_or_else(|| anyhow::anyhow!("insert entry is not a list"))?;
@@ -186,7 +207,12 @@ impl Sim {
             }
             let num = a[1].as_u64().unwrap_or(0) as u32;
             let e = self.model.entity_index(num).ok_or_else(|| anyhow::anyhow!("insert: no entity {num}"))?;
-            self.insert(e, a[2].as_str().unwrap_or(""), a[3].as_i64().unwrap_or(0) as i32).map_err(anyhow::Error::msg)?;
+            let (name, count) = (a[2].as_str().unwrap_or(""), a[3].as_i64().unwrap_or(0) as i32);
+            if matches!(self.model.entities[e].behavior, Behavior::Constant { .. }) {
+                self.set_constant(e, name, count).map_err(anyhow::Error::msg)?;
+            } else {
+                self.insert(e, name, count).map_err(anyhow::Error::msg)?;
+            }
         }
         Ok(())
     }

@@ -531,7 +531,9 @@ The game is the referee, and fsim is the fast development loop:
      removes) puts items into a chest in on_tick at t0 + k, after row k is recorded. fsim applies
      the same list before simulation tick k (`fsim run --input FILE` takes one too). A chest's
      contents are on its wires like a constant combinator's signals, from the next tick
-     (`chest_read` case).
+     (`chest_read` case). On a constant combinator an entry `[k, entity, signal, value]` sets
+     that signal in its first section instead (0 clears it; names starting `signal-` are virtual):
+     the keyboard mod's path, on the wire from the next tick (`constant_script` case).
 3. **Conformance** (`conformance/`):
    - `bp.py` is a stdlib-only blueprint builder. `power()` places substations until every
      entity tile is covered, counting substations already placed. A solid lamp screen needs
@@ -661,6 +663,33 @@ Decided with the user:
   - the longest gap between drops per button (gaps under 60 ticks). The shortest safe
     `--hold` is that + 1.
 - **Waiting on the user:** the gap meter's reading while holding Z. Set `DEFAULT_HOLD` to it + 1.
+
+### Keyboard mod (`mod/doom-input`, optional, 2026-11-02, user request)
+
+The blueprint stays vanilla; the mod is an optional input path ("the input is so dang clunky").
+- **Blueprint side:** two empty constant combinators in the pad's decoder, described
+  `doom-input:held` (on HELD) and `doom-input:pressed` (on PRESSED). Every reader tests `> 0`,
+  so they add onto the pad's outputs; without the mod nothing changes.
+- **What the game tells a mod (probed in the user's game, editor/god mode):** custom inputs fire
+  on press only (no release event; holding fires once). `walking_state` gives the held movement
+  keys every tick (8 directions; it follows the press one tick later and clears the tick after a
+  release); `shooting_state` gives Space held. In the editor WASD moves the player (the camera),
+  so the mod teleports it back. The game moves the player after on_tick, so a teleport there
+  left each held tick's move on screen (the user saw bad jitter); the teleport now runs in
+  on_player_changed_position, right after the move and before the frame is drawn (on_tick still
+  catches moves within a tile). The user confirmed it works well. Tab opens the map; next-weapon (C for the user) arrives as a linked control.
+- **Mapping:** walking direction -> signal-W/S/A/D (diagonals give the combos), shooting ->
+  signal-F, all 1 while held; next-weapon -> signal-N and its own "use" input (F) -> signal-U, one
+  tick each. Linked press events fill the tick before `walking_state` follows. The arrow keys work
+  once bound as alternative movement keys in Settings > Controls.
+- **UI:** a toggleable shortcut-bar button (a joystick icon, `tools/mod_icon.py`) and
+  Ctrl+Shift+J. Toggling on scans for the tagged combinators and anchors the camera.
+- **Latency:** a press is on the HELD network the tick after the key event, against about 3
+  ticks for a pad drop, and release ends it at once instead of the pad's 14-tick hold.
+- **Checks:** `game.py --keys` scripts the walk as keyboard writes; `--verify` checks it like the
+  pad (the pad reference adds the keyboard's contents). The mod itself was driven in a headless
+  game through its test interface (`remote.call("doom-input", "hold" | "press" | "scan")`): writes
+  reach the wire the next tick, a press lasts one tick.
 
 ### M2: movement (`demos/game.py`, 2026-11-01)
 

@@ -410,6 +410,26 @@ def chest_read(b):
     ]}
 
 
+@case(ticks=14)
+def constant_script(b):
+    """When a script's write to a constant combinator's section shows up on its wire (the
+    keyboard mod's path, mod/doom-input): an insert entry on a constant combinator sets that
+    signal to the count (0 clears it), after recording row k like chest inserts."""
+    k = b.constant(0, 0, {})
+    k2 = b.constant(1, 0, {"signal-A": 5})
+    copy = b.arithmetic(0, 2, EACH, "+", 0, EACH)
+    b.wire(k, 1, copy, RED_IN)
+    b.wire(k2, 2, copy, GREEN_IN)
+    return {"inserts": [
+        [2, k, "signal-W", 1],
+        [4, k, "signal-D", 1],
+        [5, k, "signal-W", 0],
+        [6, k2, "signal-A", 0], [6, k2, "signal-B", -3],
+        [7, k, "signal-D", 0], [7, k, "signal-N", 1],
+        [8, k, "signal-N", 0],
+    ]}
+
+
 # -- Space Age (quality) ---------------------------------------------------------------------------
 
 @case(6, dlc=True)

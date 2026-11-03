@@ -101,6 +101,19 @@ python3 harness/run.py --signals                  # refresh conformance/signal_o
 python3 harness/run.py --discover                 # export a blueprint with every option set
 ```
 
+### Keyboard input (optional mod)
+
+`mod/doom-input` drives the blueprint from the keyboard: movement keys (WASD, or the arrows once
+bound as alternative movement keys in Settings > Controls) walk and turn, Space fires, the game's
+next-weapon key switches, F is use. Toggle it with the joystick button on the shortcut bar (or
+Ctrl+Shift+J); while on, the camera stays put. Without the mod the blueprint uses its chest pad.
+
+```sh
+ln -s "$PWD/mod/doom-input" ~/Library/Application\ Support/factorio/mods/doom-input   # macOS
+python3 tools/mod_icon.py                         # redraw the shortcut icon
+python3 demos/game.py --size 64x40 --keys --verify   # the scripted walk typed on the keyboard
+```
+
 Set `FACTORIO` to use a different game binary. The default is the Steam install on macOS.
 Wire connector ids in blueprint `wires` are 1/2 = red/green input (or the only connector, on
 lamps, poles and constant combinators), 3/4 = red/green combinator output, 5 = copper.

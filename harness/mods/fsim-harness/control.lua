@@ -159,6 +159,24 @@ local function record(run, k)
   run.rows[k + 1] = row
 end
 
+-- Sets a virtual signal (an item if the name doesn't start with "signal-") in a constant
+-- combinator's first section, by rewriting the section's filters; count 0 removes it.
+local function set_constant(ent, name, count)
+  local cb = ent.get_control_behavior()
+  local sec = cb.get_section(1) or cb.add_section()
+  local typ = name:sub(1, 7) == "signal-" and "virtual" or "item"
+  local filters = {}
+  for _, f in pairs(sec.filters) do
+    if f.value and not (f.value.name == name and (f.value.type or "item") == typ) then
+      filters[#filters + 1] = f
+    end
+  end
+  if count ~= 0 then
+    filters[#filters + 1] = { value = { type = typ, name = name, quality = "normal", comparator = "=" }, min = count }
+  end
+  sec.filters = filters
+end
+
 script.on_event(defines.events.on_tick, function(e)
   local tick = e.tick
   if tick == 1 then
@@ -220,9 +238,13 @@ script.on_event(defines.events.on_tick, function(e)
       record(run, k)
       active = true
     end
-    -- Scripted chest inserts (negative count removes), after recording row k.
+    -- Scripted chest inserts (negative count removes), after recording row k. On a constant
+    -- combinator the entry sets that signal in its first section instead (0 clears it), as the
+    -- keyboard mod does.
     for _, ins in pairs(run.inserts) do
-      if ins[1] == k then
+      if ins[1] == k and run.entities[ins[2]].type == "constant-combinator" then
+        set_constant(run.entities[ins[2]], ins[3], ins[4])
+      elseif ins[1] == k then
         local inv = run.entities[ins[2]].get_inventory(defines.inventory.chest)
         if ins[4] > 0 then
           assert(inv.insert { name = ins[3], count = ins[4] } == ins[4], run.name .. ": insert failed")

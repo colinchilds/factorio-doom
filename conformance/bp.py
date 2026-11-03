@@ -105,8 +105,9 @@ class Blueprint:
         return n
 
     # Placement uses integer tile coordinates (tx, ty) of the top-left tile.
-    def constant(self, tx, ty, signals, enabled=True):
-        """signals: list of (SignalID dict, count) or dict name->count (virtual signals)."""
+    def constant(self, tx, ty, signals, enabled=True, description=None):
+        """signals: list of (SignalID dict, count) or dict name->count (virtual signals).
+        description: the combinator's description text (blueprint `player_description`)."""
         if isinstance(signals, dict):
             signals = [(sig(k), v) for k, v in signals.items()]
         # A section holds at most SECTION_SLOTS filters; longer lists take several sections.
@@ -118,7 +119,8 @@ class Blueprint:
         cb = {"sections": {"sections": sections}}
         if not enabled:
             cb["is_on"] = False
-        return self._add("constant-combinator", tx + 0.5, ty + 0.5, cb)
+        extra = {"player_description": description} if description else {}
+        return self._add("constant-combinator", tx + 0.5, ty + 0.5, cb, **extra)
 
     def _comb_pos(self, tx, ty, direction):
         """1x2 combinator footprint at tile (tx, ty); facing east/west makes it 2x1."""

@@ -28,6 +28,12 @@ The pad's outputs are two red networks: HELD (H > 0 while held; H counts down fr
 the last drop) and PRESSED (one-tick pulses, for buttons that act once per press). Removing items
 from a chest never counts as a press.
 
+Keyboard (optional, mod/doom-input): two empty constant combinators described KEYS_HELD and
+KEYS_PRESSED sit on HELD and PRESSED. The mod writes 1 on a button's lane while its key is held
+(or for one tick on a press); without the mod they stay empty. Readers only test > 0, so the two
+sources simply add. In schedules, an entry on one of them sets that signal ([t, entity, signal,
+value], fsim's and the harness's constant-combinator form of an insert).
+
     python3 demos/input_pad.py --size 320x200 --verify   # fsim vs the reference model
     python3 harness/run.py demos/gen/input_pad_n9.json   # same schedule in the game, then
     fsim conform <dir with that json> --dump harness/out/dump.json
@@ -63,6 +69,7 @@ RING = {
 # Extra buttons: (name, signal, letter).
 EXTRAS = [("use", "signal-U", "U"), ("weapon", "signal-N", "N"), ("enter", "signal-E", "E")]
 BUTTON_SIGNALS = [FORWARD, BACK, LEFT, RIGHT, FIRE] + [s for _, s, _ in EXTRAS]
+KEYS_HELD, KEYS_PRESSED = "doom-input:held", "doom-input:pressed"   # the mod finds them by these
 
 
 MAX_BUTTON = 9  # the fire button's chests reach a sum outside the ring across one cell (reach 9)
@@ -245,10 +252,13 @@ def build_pad(b, x0, y0, n, hold=DEFAULT_HOLD, meters=False):
     net("Bg", (neg, GREEN_IN))
     net("B", (neg, RED_OUT), (d1, RED_IN), (d2, RED_IN), (d3, RED_IN))
     net("H'", (d1, GREEN_OUT), (d2, GREEN_OUT), (d2, GREEN_IN), (d3, GREEN_IN), (minus, 2))
-    net("H", (d1, RED_OUT), (d2, RED_OUT), *[(lamp_, RED_IN) for lamp_ in lamps])
-    net("P", (d3, RED_OUT))
+    keys_held = b.constant(x0 + 4, yc, {}, description=KEYS_HELD)
+    keys_pressed = b.constant(x0 + 4, yc + 1, {}, description=KEYS_PRESSED)
+    net("H", (d1, RED_OUT), (d2, RED_OUT), (keys_held, 1), *[(lamp_, RED_IN) for lamp_ in lamps])
+    net("P", (d3, RED_OUT), (keys_pressed, 1))
     out = {"cells": cells, "neg": neg, "d1": d1, "d2": d2, "d3": d3, "sums": sums,
-           "held": (d1, RED_OUT), "pressed": (d3, RED_OUT), "lamps": lamps}
+           "held": (d1, RED_OUT), "pressed": (d3, RED_OUT), "lamps": lamps,
+           "keys_held": keys_held, "keys_pressed": keys_pressed}
     if meters:
         # Presses per button so far: one hold should be one press.
         acc = b.arithmetic(x0 + 5, yc, EACH, "*", 1, EACH)
@@ -309,21 +319,34 @@ def schedule(pad, hold, seed=1):
 
 
 def reference(pad, inserts, ticks, hold):
-    """H(t) and P(t) per button signal, from the formulas in the module docstring."""
+    """H(t) and P(t) per button signal, from the formulas in the module docstring: what the
+    HELD and PRESSED networks hold at t + 1 (the decoder's output at t plus the keyboard
+    combinators' contents at t)."""
     owner = {}
     for c in pad["cells"].values():
         for e in c["chests"]:
             owner[e] = c["signals"]
+    keyed = {pad.get("keys_held"): "held", pad.get("keys_pressed"): "pressed"}
     X = [{s: 0 for s in BUTTON_SIGNALS} for _ in range(ticks)]
+    K = {"held": [], "pressed": []}
     total = {s: 0 for s in BUTTON_SIGNALS}
+    keys = {"held": {s: 0 for s in BUTTON_SIGNALS}, "pressed": {s: 0 for s in BUTTON_SIGNALS}}
     by_tick = {}
-    for t, e, _, k in inserts:
-        by_tick.setdefault(t, []).append((e, k))
+    for t, e, name, k in inserts:
+        if e in keyed:
+            by_tick.setdefault(t, []).append((keyed[e], name, k))
+        else:
+            by_tick.setdefault(t, []).append((e, None, k))
     for t in range(ticks):
-        for e, k in by_tick.get(t, []):
-            for s in owner[e]:
-                total[s] += k
+        for e, name, k in by_tick.get(t, []):
+            if name is None:
+                for s in owner[e]:
+                    total[s] += k
+            else:
+                keys[e][name] = k       # a constant combinator entry sets the signal
         X[t] = dict(total)
+        K["held"].append(dict(keys["held"]))
+        K["pressed"].append(dict(keys["pressed"]))
     x = lambda t, s: X[t][s] if t >= 0 else 0  # noqa: E731
     H = [{s: 0 for s in BUTTON_SIGNALS} for _ in range(ticks)]
     P = [{s: 0 for s in BUTTON_SIGNALS} for _ in range(ticks)]
@@ -333,6 +356,14 @@ def reference(pad, inserts, ticks, hold):
             prev = H[t - 1][s] if t else 0
             H[t][s] = hold if delta > 0 else max(prev - 1, 0)
             P[t][s] = 1 if delta > 0 and prev == 0 else 0
+    # The decoder's recurrences use its own outputs; the keyboard adds onto the networks after.
+    # A write scheduled for tick k is on the network during tick k (like a chest's contents, which
+    # the sums read), so the network at t + 1 holds the keyboard's state as of t + 1.
+    for t in range(ticks):
+        k = min(t + 1, ticks - 1)
+        for s in BUTTON_SIGNALS:
+            H[t][s] += K["held"][k][s]
+            P[t][s] += K["pressed"][k][s]
     # Gap meter: G'(t) = O(t-1) + 1; O = 0 on a drop, else G' frozen below GAP_CAP;
     # C = G' at a drop (under the cap); M(t) = max(C(t-1), M(t-1)).
     M = [{s: 0 for s in BUTTON_SIGNALS} for _ in range(ticks)]

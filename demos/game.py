@@ -436,8 +436,10 @@ def build(w, h, n=None, hold=input_pad.DEFAULT_HOLD, substation_quality=DEFAULT_
 COMBAT_SCRIPT = [("ring -1,0", 700, 784), ("ring -1,0", 800, 800), ("fire", 840, 842), ("weapon", 850, 851), ("ring 1,0", 860, 884), ("ring 1,0", 905, 905), ("ring 0,-1", 920, 995), ("ring 1,0", 1015, 1015), ("ring 1,0", 1031, 1031), ("ring 1,0", 1047, 1047), ("fire", 1080, 1090), ("weapon", 1120, 1121), ("weapon", 1138, 1139), ("weapon", 1156, 1157), ("weapon", 1174, 1175), ("ring 0,-1", 1120, 1225), ("ring -1,0", 1228, 1228), ("fire", 1250, 1325)]
 
 
-def schedule(pad, ticks, seed=2):
-    """Drops every 8-12 ticks while a button is held."""
+def schedule(pad, ticks, seed=2, keys=False):
+    """Drops every 8-12 ticks while a button is held. With keys, the same script typed on the
+    keyboard instead (mod/doom-input): the keyboard combinators hold a button's signal from the
+    entry's start through its end, and a weapon entry is a one-tick press at its start."""
     # Timing and chest choice from separate generators: the pad's chests per button depend on the
     # screen size, and choice() over a different count would shift the timing, so the walk would
     # differ by size.
@@ -463,6 +465,8 @@ def schedule(pad, ticks, seed=2):
               ("ring 1,-1", 245, 420),         # forward + right: an arc, sliding on walls
               ("ring 0,1", 430, 520),          # back up
               ("ring -1,-1", 530, 670)] + COMBAT_SCRIPT
+    if keys:
+        return key_schedule(pad, script, ticks)
     inserts = []
     for cell, start, end in script:
         t = start
@@ -470,6 +474,27 @@ def schedule(pad, ticks, seed=2):
             inserts.append([t, pick.choice(cells[cell]["chests"]), "iron-plate", 1])
             t += rnd.randint(8, 12)
     return sorted(inserts)
+
+
+def key_schedule(pad, script, ticks):
+    """Keyboard combinator writes for a script of (cell, start, end): [t, entity, signal, 0/1]."""
+    held = [set() for _ in range(ticks)]
+    pressed = [set() for _ in range(ticks)]
+    for cell, start, end in script:
+        if start > ticks - 20:
+            continue
+        if cell == "weapon":
+            pressed[start].add(NEXT["name"])
+            continue
+        for t in range(start, min(end, ticks - 20) + 1):
+            held[t] |= set(pad["cells"][cell]["signals"])
+    out = []
+    for ent, per in ((pad["keys_held"], held), (pad["keys_pressed"], pressed)):
+        prev = set()
+        for t, now in enumerate(per):
+            out += [[t, ent, s, 1] for s in sorted(now - prev)] + [[t, ent, s, 0] for s in sorted(prev - now)]
+            prev = now
+    return sorted(out)
 
 
 def reference_states(pad, g, nodes, inserts, ticks, hold, lat):
@@ -695,6 +720,8 @@ def main():
     ap.add_argument("--hold", type=int, default=input_pad.DEFAULT_HOLD)
     ap.add_argument("--ticks", type=int, default=1340)
     ap.add_argument("--verify", action="store_true")
+    ap.add_argument("--keys", action="store_true",
+                    help="script the input as the keyboard mod (mod/doom-input) instead of pad drops")
     ap.add_argument("--tex", type=int, default=raycast.DEFAULT_TEX, help="texture resolution (texels per tile)")
     ap.add_argument("--flat", type=int, default=raycast.DEFAULT_FLAT,
                     help="floor/ceiling texture resolution (texels per tile: 8, 16, 32; 0 = untextured)")
@@ -714,7 +741,7 @@ def main():
     b, pad, g, nodes, gr, cols, rows, scal, layout, lat, probe = build(
         w, h, a.button_size, a.hold, a.substation_quality, a.tex, a.flat, things,
         turn, raycast.Shading.from_args(a), not a.no_hud, not a.no_weapon)
-    inserts = schedule(pad, a.ticks)
+    inserts = schedule(pad, a.ticks, keys=a.keys)
     data = b.to_json()
     data["fsim"] = {"ticks": a.ticks, "doc": f"M4 {w}x{h}", "inserts": inserts}
     gen = HERE / "gen"
