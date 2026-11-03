@@ -2,9 +2,12 @@
 occlusion (raycast.build_graph(..., things=...)).
 
 Sprites are on the walls' texel grid (STEX = 64 texels per tile, Doom units / 2) in a box of
-HP = 32 rows from eye level (z = 0) down to the floor (z = 0.5 tile), so they only show on the
-lower half of the screen. Per column only the nearest thing whose box covers it is drawn (a
-farther one is hidden in the nearer one's box columns, transparent texels included).
+HP = 32 rows from 64 units above the floor down to it. Texel row te = View.thing_eye() is at eye
+level (0 with the eye at 64 units, before 2026-11-03: only the lower half of the screen had thing
+rows; 12 with the eye at 40, so monsters reach above it as in Doom). Per column only the nearest
+thing whose box covers it is drawn (a farther one is hidden in the nearer one's box columns,
+transparent texels included). A thing may move (the `pos` hook: a monster's position from the
+state bus, monsters.py).
 
 Per thing s at (ex, ey), every frame (scalars, from the camera's angle and position):
     rx, ry      ex - PX, ey - PY (1/256 tiles)
@@ -19,13 +22,16 @@ Two min trees over the things (absent lanes lose) give per column Zt (the key: u
 depth first) and Dt (depth and frame). Then:
     SK = Zt AND (2^KB - 1), FR = Dt AND 63 -> lookups per (frame, u): a mask word (bit 31 - t:
         texel row t is opaque) and HP / 8 texel words (8 texels each, like the wall strips)
-    row y (r = 2y + 1 - H > 0), texel row t = Vs >> 2 with Vs = Dt / cs_y = 4 STEX z (per chunk of
-    rows in raycast.build_graph, cs_y a constant vector over its lanes):
-      kill   Q = Dt / (4 cs_y), P = 2^Q (0 once Q >= 32), OM = mask * P: the sign is row t's opacity.
+    row y (r = 2y + 1 - H), texel row t = te + Q below the eye and te - 1 + Q above it, with
+    Q = Dt / (4 cs_y) = 4 STEX z truncated toward 0 (negative above the eye; per chunk of rows in
+    raycast.build_graph, cs_y a constant vector over its lanes):
+      kill   P = 2^t (0 for t < 0 or t >= 32: the offset te or te - 1 is a constant on P's input),
+             OM = mask * P: the sign is row t's opacity.
              OM < 0 and the wall farther than the thing (D - Dt / 512 > 0) -> 2^29 onto the wall's
              V, which then misses every wall mux and the bounded flat select: nothing else shows.
-      texel  Vs, a mux per word, a shift, and one palette decider per color copying that color
-             times the thing's brightness on columns where it is in front of the wall.
+      texel  Vs = Dt / cs_y plus 4 te (+ 3 above the eye: 4 t to 4 t + 3 either way), a mux per
+             word, a shift, and one palette decider per color copying that color times the thing's
+             brightness on columns where it is in front of the wall.
 The kill has to reach V's network with V, so the thing path is timed backwards from there: trees
 out 4 ticks before V (t_v; the chunks' quality spread adds one). Up to 8 things fit (3 levels).
 """
@@ -47,7 +53,12 @@ STEX = 64                  # sprite texels per tile (each texel 2x2 Doom units, 
 HP = STEX // 2             # box rows: eye level down to the floor
 F = 12                     # fraction bits of U (the box column)
 QD = 10                    # Zt's depth: alpha >> QD (1/256 tile)
-DIV_SIGMA = round((1 << 20) / 676)   # sigma = alpha * PLANE / 2^20
+
+
+def div_sigma(plane):
+    """sigma = alpha * plane / 2^20 = alpha / div_sigma(plane)."""
+    return round((1 << 20) / plane)
+
 NEAR = 1 << 16             # alpha of 1/4 tile: nearer (or behind) things aren't drawn
 KILL = 1 << 29             # added to a killed pixel's V
 HIDE = -(1 << 23)          # added to a hidden thing's depth (column_stage hide)
@@ -160,7 +171,8 @@ def tree(g, level, name, levels=None):
     return level[0]
 
 
-def column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_v, shade, hide=None, frame=None):
+def column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_v, shade, hide=None, frame=None, plane=676,
+                 pos=None):
     """The per-thing scalars, the per-column key/depth vectors and the lookup blocks. Returns a dict
     of nodes for the row stage (all timed against t_v, the wall V's time), and each thing's depth
     and lateral offset ("alpha", "lat": Scalars) for the aim (combat.py).
@@ -172,7 +184,11 @@ def column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_v, shade,
     thing's depth is behind the camera, so neither leaf passes and it isn't drawn (a picked-up
     item). |alpha| < 2^23 on a 16-tile map, so alpha - 2^23 stays negative, and its Zt base
     (alpha >> qd) << KB stays above -2^31 with qd = QD for KB <= 17; wider boxes (a dying imp's)
-    take one bit of Zt's depth per extra key bit (qd = QD + KB - 17)."""
+    take one bit of Zt's depth per extra key bit (qd = QD + KB - 17).
+
+    plane: the camera plane (raycast.View). pos(g, i, out_x, out_y): thing i's offset from the
+    camera (rx, ry) as Scalars on those signals, ready with the camera position X0 (a moving
+    monster's position from the state bus), or None for its fixed place."""
     if len(things) > 8:
         raise ValueError(f"{len(things)} things: at most 8 fit in the latency budget")
     X0, Y0, (ox, oy) = pos0
@@ -186,8 +202,12 @@ def column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_v, shade,
     zleaves, dleaves, alphas, lats, rows = [], [], [], [], []
     for i, (tx, ty, name) in enumerate(things):
         ex, ey = int(tx * 256), int(ty * 256)
-        rx = g.ss(ex - ox, "-", X0, f"rx{i}")
-        ry = g.ss(ey - oy, "-", Y0, f"ry{i}")
+        moved = pos(g, i) if pos else None
+        if moved:
+            rx, ry = moved
+        else:
+            rx = g.ss(ex - ox, "-", X0, f"rx{i}")
+            ry = g.ss(ey - oy, "-", Y0, f"ry{i}")
         sa, sl = g.new_scalar_signal(), g.new_scalar_signal()
         parts = [mul(g, rx, DX, sa, f"a{i}x"), mul(g, ry, DY, sa, f"a{i}y")]
         hid = hide(g, i, sa) if hide else None
@@ -199,7 +219,7 @@ def column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_v, shade,
         lat = Scalar(Collect([mul(g, ry, DX, sl, f"l{i}x"), mul(g, rx, NDY, sl, f"l{i}y")]), sl)
         alphas.append(alpha)
         lats.append(lat)
-        sigma = g.ss(alpha, "/", DIV_SIGMA, f"sigma{i}")
+        sigma = g.ss(alpha, "/", div_sigma(plane), f"sigma{i}")
         dc = g.ss(alpha, ">>", qd, f"dc{i}")
         U = [g.vs(vec(camx, "camx"), "*", sigma, f"u{i}"), g.vs(vec([-1] * w, "-1"), "*", lat, f"lat{i}")]
         ZB = g.vs(vec([1 << KB] * w, "2^KB"), "*", dc, f"zb{i}")
@@ -254,31 +274,35 @@ def column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_v, shade,
 # ---------------------------------------------------------------------------------------------
 # Float reference
 
-def ideal(img, vals, things, sprites, wall_d, w, h, shade, proj=None):
-    """Draw the things into img (float math): per column the nearest covering thing, per lower row
-    its texel where opaque and nearer than the wall (wall_d[c]: perpendicular distance, tiles)."""
-    from raycast import DS, PLANE  # noqa: E402
+def ideal(img, vals, things, sprites, wall_d, w, h, shade, proj=None, view=None, xy=None):
+    """Draw the things into img (float math): per column the nearest covering thing, per row its
+    texel where opaque and nearer than the wall (wall_d[c]: perpendicular distance, tiles).
+    view: raycast.View; xy: {i: (x, y)} tiles for things that moved."""
+    from raycast import DS, View  # noqa: E402
+    view = view or View()
+    plane, te = view.plane, view.thing_eye()
     px, py = vals["PX"] / 256, vals["PY"] / 256
     dx, dy = vals["DX"] / 1024, vals["DY"] / 1024
     fr = {f["name"]: f for f in sprites["frames"]}
     for c in range(w):
         camx = ((2 * c + 1 - w) * 1024 // w) / 1024
         best = None
-        for tx, ty, name in things:
+        for i, (tx, ty, name) in enumerate(things):
+            tx, ty = (xy or {}).get(i, (tx, ty))
             rx, ry = tx - px, ty - py
             a = rx * dx + ry * dy
             if a < NEAR / (1 << 18):
                 continue
             lat = ry * dx - rx * dy
             texw = sprites["types"][name[:4]]
-            u = math.floor((a * camx * PLANE / 1024 - lat) * STEX + texw / 2)
+            u = math.floor((a * camx * plane / 1024 - lat) * STEX + texw / 2)
             if 0 <= u < texw and (best is None or a < best[0]):
                 best = (a, u, fr[name])
         if best is None or best[0] >= wall_d[c]:
             continue
         a, u, f = best
         br = int(shade.bright / (a * DS + shade.fog))
-        for y in range(first_row(h), h):
-            t = math.floor((2 * y + 1 - h) * a / (2 * (proj or h)) * STEX)
+        for y in range(h):
+            t = te + math.floor((2 * y + 1 - h) * a / (2 * (proj or h)) * STEX)
             if 0 <= t < HP and f["texels"][t][u]:
                 img[y][c] = color(sprites["colors"][f["texels"][t][u] - 1], br)

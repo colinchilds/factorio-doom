@@ -26,8 +26,10 @@ Everything runs as vectors whose lanes are screen columns (no per-column units):
             is 15, outputs that color at the row's brightness (constant: the distance is H / |r|).
             Runs beside the march, so it adds no latency.
   things    monsters and items (demos/things.py): per column the nearest thing's box column and
-            depth, per lower row its texel; an opaque one in front of the wall kills the wall's
-            pixel through V and paints its own color. Timed back from V: no latency.
+            depth, per row its texel; an opaque one in front of the wall kills the wall's pixel
+            through V and paints its own color. Timed back from V: no latency.
+  view      View: the field of view, pixel aspect and eye height are build constants (default:
+            Doom's pixel aspect 1.2 and eye at 40 units, so monsters stand taller than the eye).
   hud       the status bar (demos/hud.py) in the bottom rows: a constant row plus one decider per
             (digit or face slot, glyph, row); the view above it keeps the full screen's projection.
 
@@ -86,7 +88,7 @@ K = 16                       # grid lines marched per axis (>= map size)
 FP = 256                     # position units per tile
 CENTER = (8 * FP, 7.5 * FP)  # camera path: circle around this point
 RADIUS = int(1.25 * FP)
-PLANE = 676                  # tan(fov/2) * 1024: about 66 degrees
+PLANE = 676                  # tan(fov/2) * 1024 before View (2026-11-03): about 66 degrees
 HIT = -(1 << 30)
 DS = 1 << 15                 # distance D: 2^15 per tile
 DEFAULT_FOG = 8.0            # tiles to half brightness (4 looked murky on lamps)
@@ -142,14 +144,14 @@ def trig(fn):
     return {a: round(1024 * fn(2 * math.pi * a / 256)) + 1024 for a in range(256)}
 
 
-def camera_tables(offset=0):
+def camera_tables(offset=0, plane=PLANE):
     """Per view angle a (0..255, plus offset): direction DX, DY (scale 1024) and camera plane
-    PLX, PLY."""
+    PLX, PLY (plane: tan(fov / 2) * 1024)."""
     t = {}
     for a in range(256):
         th = 2 * math.pi * ((a + offset) % 256) / 256
         dx, dy = round(1024 * math.cos(th)), round(1024 * math.sin(th))
-        t[a] = {"DX": dx, "DY": dy, "PLX": (dy * -PLANE) >> 10, "PLY": (dx * PLANE) >> 10}
+        t[a] = {"DX": dx, "DY": dy, "PLX": (dy * -plane) >> 10, "PLY": (dx * plane) >> 10}
     return t
 
 
@@ -207,6 +209,62 @@ class Shading:
     @classmethod
     def from_args(cls, a):
         return cls(a.gamma, a.saturation, a.fog)
+
+
+DEFAULT_VIEW = dict(fov=None, aspect=1.2, eye=40)   # user request 2026-11-03: taller monsters
+
+
+class View:
+    """The view's geometry (build parameters; constants in the blueprint, so no combinators or
+    ticks; user request 2026-11-03, the monsters looked short):
+      fov     the horizontal field of view, degrees (Doom: 90)
+      aspect  how much taller than wide a pixel shows the world (Doom's 320x200 on a 4:3 screen:
+              1.2); None: the projection height is the screen height (before 2026-11-03, a
+              squat 0.83 at 16:10 with the old 66 degrees)
+      eye     the eye's height above the floor in Doom units (a tile, floor to ceiling, is 128;
+              Doom: 41). Before 2026-11-03, 64 (half way up the wall).
+    proj(w, h) is the projection height: rows per tile at distance 1."""
+
+    def __init__(self, fov=DEFAULT_VIEW["fov"], aspect=DEFAULT_VIEW["aspect"], eye=DEFAULT_VIEW["eye"], plane=None):
+        self.plane = plane or round(1024 * math.tan(math.radians((fov or 66.85) / 2)))
+        self.fov = 2 * math.degrees(math.atan(self.plane / 1024))
+        self.aspect, self.eye = aspect, eye
+        if not (0 < self.fov < 150 and (aspect is None or 0.2 <= aspect <= 5) and 0 < eye < 128 and eye % 2 == 0
+                and eye >= 64 - 2 * th.HP):
+            raise SystemExit(f"view: need 0 < fov < 150, 0.2 <= aspect <= 5 and an even eye height in "
+                             f"[{64 - 2 * th.HP}, 128) (got {self.fov:.1f}, {aspect}, {eye})")
+
+    def proj(self, w, h):
+        return round(self.aspect * w * 512 / self.plane) if self.aspect else h
+
+    def wall_offset(self, tex):
+        """4 tex (1 - e): V + this is 4 times the wall's texel row from the top."""
+        if (self.eye * tex) % 32:
+            raise SystemExit(f"eye height {self.eye}: eye * tex ({tex}) must be a multiple of 32")
+        return 4 * tex - self.eye * tex // 32
+
+    def flat_factor(self, r):
+        """Row r's floor (r > 0) or ceiling distance, in units of proj / |r| tiles: 2e or 2(1 - e)."""
+        return (self.eye if r > 0 else 128 - self.eye) / 64
+
+    def thing_eye(self):
+        """The things' texel row at eye level (rows 0..HP-1 from 64 units up down to the floor)."""
+        return (64 - self.eye) // 2
+
+    @classmethod
+    def from_args(cls, a):
+        return cls(a.fov, None if a.aspect == 0 else a.aspect, a.eye)
+
+
+
+
+def view_args(ap):
+    ap.add_argument("--fov", type=float, default=DEFAULT_VIEW["fov"], help="horizontal field of view, degrees (Doom: 90)")
+    ap.add_argument("--aspect", type=float, default=DEFAULT_VIEW["aspect"],
+                    help="pixel aspect: how much taller than wide the world shows (Doom: 1.2; 0 = the projection "
+                         "height is the screen height)")
+    ap.add_argument("--eye", type=int, default=DEFAULT_VIEW["eye"],
+                    help="eye height above the floor in Doom units (a tile is 128 tall; Doom: 41)")
 
 
 def shading_args(ap):
@@ -307,13 +365,16 @@ def flat_word(texels, v, j):
     return sem.i32(sum(texels[v][8 * j + n] << (28 - 4 * n) for n in range(8)))
 
 
-def row_scale(y, h, shade, proj=None):
+def row_scale(y, h, shade, proj=None, f=1):
     """Flat sampling for screen row y of a view h rows tall: K with ray * K = the floor offset in
-    2^-32 tiles (RAW has the ray at 2^20), and the brightness at that distance (proj / |r| tiles;
-    proj, the projection height in rows, is h unless the HUD crops the view)."""
+    2^-32 tiles (RAW has the ray at 2^20), and the brightness at that distance (f proj / |r| tiles;
+    proj, the projection height in rows, is h unless the HUD crops the view or View sets it; f:
+    View.flat_factor, 1 with the eye half way up)."""
     proj = proj or h
     r = abs(2 * y + 1 - h)
-    return round(proj * (1 << 12) / r), shade.bright // (proj * DS // r + shade.fog)
+    if f == 1:
+        return round(proj * (1 << 12) / r), shade.bright // (proj * DS // r + shade.fog)
+    return round(f * proj * (1 << 12) / r), shade.bright // (round(f * proj * DS) // r + shade.fog)
 
 
 def flat_color(c4, br):
@@ -543,7 +604,7 @@ def q_signal(s, quality):
 
 
 def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX, flat=DEFAULT_FLAT, things=None,
-                shade=None, hud=None, weapon=None, rows_per_net=None):
+                shade=None, hud=None, weapon=None, rows_per_net=None, view=None):
     """camera(g) -> (A, PX, PY, extra scalars): view angle 0..255 and an odd position (1/FP
     tiles) as scalars of g. extra may hold "angle_offset", added to A by the tables, and
     "angle_sub": A counts 2^sub steps per view angle (0..(256 << sub) - 1). It must hold
@@ -554,6 +615,7 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
     keeps the full screen's projection (proj = h), so it is cropped, not squashed.
     weapon(g, extra) -> Scalar: the player's weapon picture (a composite id of demos/weapons.py),
     or None. A compositor per view row (one more tick) puts it in front of everything.
+    view: View (field of view, pixel aspect, eye height).
 
     The row stage and the texture lookup block are fixed nodes left of (and below) the screen,
     avoiding the substation lattice hole(x, y); the rest is placed by the compiler left of them
@@ -570,7 +632,8 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
     NT, nw = len(textures), tex // 8
     flats = load_flats(flat, shade) if flat else None
     bar = hd.Hud(w, h, shade) if hud else None
-    proj, hv = h, h - (bar.hb if bar else 0)   # projection height; view rows
+    view = view or View()
+    proj, hv = view.proj(w, h), h - (bar.hb if bar else 0)   # projection height; view rows
     arms = wp.Weapons(w, hv, shade, bar=bool(bar)) if weapon else None
 
     # -- scalars: the camera vectors come straight out of signed lookups keyed by the view angle.
@@ -586,7 +649,7 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
     lag = max(PX.node.time, PY.node.time) - 1 - A.node.time
     if lag > 0:
         A = Scalar(g.delay(A.node, lag), A.signal)
-    tabs = camera_tables(extra.pop("angle_offset", 0))
+    tabs = camera_tables(extra.pop("angle_offset", 0), view.plane)
     pos0 = extra.pop("pos0", None)
     hide = extra.pop("hide", None)   # hide(g, i, out): thing i's hide flag (picked-up items), see things.py
     # A may count in 2^sub steps per view angle (finer turning); the tables key on A directly.
@@ -706,7 +769,8 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
     sp = 1 if k > 1 else 0
     t_V = MV.time + 1 + sp   # the chunks' V
     if things:
-        col = th.column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_V - sp, shade, hide, frame)
+        col = th.column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_V - sp, shade, hide, frame,
+                              view.plane, extra.pop("thing_pos", None))
         if aim:
             aim(g, col, [MV, MH], cols[w // 2])
 
@@ -815,8 +879,16 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
         COLOR_W = at(WF.node, t_P - 1)
     nib = lambda c, wire=RED, first=None: nibble_range(c, wire, first)  # noqa: E731
     lim = th.KILL >> 1   # V outside +-lim is a killed pixel
-    out_of_wall = [sem.cond(EACH, "<", -2 * tex, RED), sem.cond(EACH, ">=", -lim, RED, "and"),
-                   sem.cond(EACH, ">=", 2 * tex, RED, "or"), sem.cond(EACH, "<", lim, RED, "and")]
+    # The wall covers -OV <= V < 4 tex - OV (OV = 2 tex with the eye half way up); V + OV is 4 times
+    # the texel row from the top.
+    OV = view.wall_offset(tex)
+    out_of_wall = [sem.cond(EACH, "<", -OV, RED), sem.cond(EACH, ">=", -lim, RED, "and"),
+                   sem.cond(EACH, ">=", 4 * tex - OV, RED, "or"), sem.cond(EACH, "<", lim, RED, "and")]
+    # Things: texel row t (0..HP-1, from 64 units up to the floor) = te + Vs / 4 below the eye and
+    # te - 1 + Vs / 4 above it (Vs < 0 there, truncated toward 0), te = View.thing_eye(). Rows above
+    # the eye show things only when te > 0, and only as far up as a thing's top can reach (at NEAR).
+    te = view.thing_eye()
+    thing_up = lambda y: te > 0 and (hv - 1 - 2 * y) <= 2 * proj * te * (1 << 18) / (th.STEX * th.NEAR)  # noqa: E731
     rows, units = [], []
     for ch in chunks:
         y0, n = ch
@@ -833,20 +905,28 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
                 wk.append(Node(g, "decider", sem.decider_spec([sem.cond(WF.signal, "=", cid, RED)], kv),
                                red=[KILL_W], time=t_V, label=f"weapon kill{y0}.{cid}"))
             node.update({f"wk{i}": d for i, d in enumerate(wk)})
-        if things and floor:
+        tchunk = things and (floor or thing_up(y0 + n - 1))
+        toff = te - (0 if floor else 1)   # t = toff + Q
+        if tchunk:
             node["kcsq"] = cv(ch, lambda x, y: 4 * th.row_divisor(y, hv, proj), "4 c_s")
             Qn = g.vv(Dt6, "/", node["kcsq"], f"tq{y0}")
-            P2 = g.op("arith", sem.arith_spec(2, "^", EACH, EACH, None, RED), red=[Qn], label=f"tp{y0}")
+            # P = 2^t (0 for t < 0 or t >= 32): the offset rides on P's input wire.
+            qin = [Qn] + ([cv(ch, lambda x, y: toff, "t offset")] if toff else [])
+            P2 = g.op("arith", sem.arith_spec(2, "^", EACH, EACH, None, RED), red=qin, label=f"tp{y0}")
             OM = g.vv(M6, "*", P2, f"tom{y0}")
             kill = g.decider([sem.cond(EACH, "<", 0, RED), sem.cond(EACH, ">", 0, GREEN, "and")],
                              [sem.out(EACH, constant=th.KILL)], red=OM, green=[D6, NSD6], label=f"kill{y0}")
             node.update({"tq": Qn, "tp": P2, "tom": OM, "kill": kill})
             kills.append(kill)
         Vk = [V] + kills + wk
-        mux = [g.decider([sem.cond(EACH, "!=", 0, GREEN), sem.cond(EACH, ">=", 4 * (8 * j - tex // 2), RED, "and"),
-                          sem.cond(EACH, "<", 4 * (8 * j + 8 - tex // 2), RED, "and")],
+        mux = [g.decider([sem.cond(EACH, "!=", 0, GREEN), sem.cond(EACH, ">=", 32 * j - OV, RED, "and"),
+                          sem.cond(EACH, "<", 32 * j + 32 - OV, RED, "and")],
                          [sem.out(EACH, networks=GREEN)], red=Vk, green=W6[j], label=f"mux{y0}.{j}") for j in range(nw)]
-        S = g.vc(Vk, "AND", 28, f"nibble{y0}")
+        if OV % 32:   # (V + OV) AND 28: the offset (mod 32) rides on the shift's green input
+            S = g.op("arith", sem.arith_spec(EACH, "AND", 28, EACH), red=Vk,
+                     green=[cv(ch, lambda x, y: OV % 32, "wall offset")], label=f"nibble{y0}")
+        else:
+            S = g.vc(Vk, "AND", 28, f"nibble{y0}")
         T = g.vv(mux, "<<", S, f"texel{y0}")
         node.update({"s": S, "t": T, **{f"mux{j}": m for j, m in enumerate(mux)}})
         pals = [g.decider(nib(c), [sem.out(EACH, networks=GREEN)], red=T, green=CT6[c], label=f"pal{y0}.{c}") for c in CT]
@@ -855,7 +935,8 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
         # The floor or ceiling where V is out of the wall.
         if flat:
             part = flats["floor" if floor else "ceiling"]
-            KY = node["kky"] = cv(ch, lambda x, y: row_scale(y, hv, shade, proj)[0], "k_y")
+            ff = view.flat_factor(1 if floor else -1)
+            KY = node["kky"] = cv(ch, lambda x, y: row_scale(y, hv, shade, proj, ff)[0], "k_y")
             FXp, FYp = (g.vv(R, "*", KY, f"f{a}{y0}*") for R, a in zip(R6, "xy"))
             FX, FY = (g.vs(n, "+", Pa, f"f{a}{y0}") for n, Pa, a in zip((FXp, FYp), Ps, "xy"))
             node.update({"fxp": FXp, "fyp": FYp, "fx": FX, "fy": FY})
@@ -873,7 +954,7 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
             ones = node["kones"] = cv(ch, lambda x, y: 1, "ones")
             fci = [g.decider(nib(c) + [sem.cond(EACH, "!=", 0, GREEN, "and")], [sem.out(EACH, constant=pack(c4) or 1)],
                              red=Tf, green=ones, label=f"fpal{y0}.{c}") for c, c4 in enumerate(part["c4"])]
-            node["kbr"] = cv(ch, lambda x, y: max(1, row_scale(y, hv, shade, proj)[1]), "flat brightness")
+            node["kbr"] = cv(ch, lambda x, y: max(1, row_scale(y, hv, shade, proj, ff)[1]), "flat brightness")
             FC = g.vv(fci, "*", node["kbr"], f"flat{y0}")
             node.update({"fu": sf.red[0], "fs": sf, "wd": wd, "tf": Tf, "fc": FC, **{f"fpal{c}": d for c, d in enumerate(fci)}})
         else:
@@ -886,12 +967,14 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
             d.green, d.nominal = [sel], "green"
         node.update({"sel": sel, "e1": e1, "e2": e2})
         out.append(e2)
-        if things and floor:
-            # The thing's texel row: Vs = Dt / cs_y on green, where the weapon's kill joins it.
+        if tchunk:
+            # The thing's texel row: Vs = Dt / cs_y on green, where the weapon's kill joins it, and
+            # the offset making Vs + 4 toff + (3 above the eye) four times the row t.
             node["kcs"] = cv(ch, lambda x, y: th.row_divisor(y, hv, proj), "c_s")
             Vs = g.op("arith", sem.arith_spec(EACH, "/", EACH, EACH, GREEN, RED),
                       red=[node["kcs"]], green=[at(Dt6, t_V - 1)], label=f"tv{y0}")
-            Vsk = [Vs] + wk
+            vo = 4 * toff + (0 if floor else 3)
+            Vsk = [Vs] + wk + ([cv(ch, lambda x, y: vo, "texel offset")] if vo else [])
             tm = [g.decider([sem.cond(EACH, "!=", 0, RED), sem.cond(EACH, ">=", 32 * j, GREEN, "and"),
                              sem.cond(EACH, "<", 32 * j + 32, GREEN, "and")], [sem.out(EACH, networks=RED)],
                             red=WB6[j], green=Vsk, label=f"tmux{y0}.{j}") for j in range(th.HP // 8)]
@@ -937,7 +1020,7 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
     area = list({n.id: n for n in area if n.kind != "const"}.values())
     x_right = place_chunks(g, w, chunks, units, area, lookups, hole, k, mgrid)
     layout = {"x_right": x_right, "textures": textures, "tex": tex, "flats": flats, "flat": flat, "things": things,
-              "sprites": sprites, "shade": shade, "hv": hv, "proj": proj, "hud": bar, "bg": bg, "weapon": arms,
+              "sprites": sprites, "shade": shade, "hv": hv, "proj": proj, "view": view, "hud": bar, "bg": bg, "weapon": arms,
               "chunks": chunks, "lane": lane, "k": k}
     return g, cols, rows, {**extra, "A": A, "PX": PX, "PY": PY, "tables": tabs, "angle_sub": sub}, layout
 
@@ -984,13 +1067,13 @@ def wire_screen(b, ent, cols, layout, w, h, rows):
 
 
 def build(w, h, substation_quality=DEFAULT_SUBSTATION_QUALITY, tex=DEFAULT_TEX, flat=DEFAULT_FLAT, things=th.THINGS,
-          shade=None, hud=None, weapon=None, rows=DEFAULT_ROWS):
+          shade=None, hud=None, weapon=None, rows=DEFAULT_ROWS, view=None):
     if w > len(LANE_SIGNALS):
         raise SystemExit(f"width {w} needs {w} lane signals, only {len(LANE_SIGNALS)}")
     b = Blueprint(f"Raycaster M4 {w}x{h}", substation_quality)
     lattice = b.grid.hole
     g, cols, rows_, scal, layout = build_graph(w, h, hole=lattice, tex=tex, flat=flat, things=things, shade=shade,
-                                               hud=hud, weapon=weapon, rows_per_net=rows)
+                                               hud=hud, weapon=weapon, rows_per_net=rows, view=view)
     rows = rows_
     ent = g.compile(b, blocked=lattice, region=lambda x, y: x <= -2, x_right=layout["x_right"])
     wire_screen(b, ent, cols, layout, w, h, rows)
@@ -1056,14 +1139,16 @@ def ideal(g, scal, layout, w, h, T):
         camx = ((2 * c + 1 - w) * 1024 // w) / 1024
         rdx = (vals["DX"] + vals["PLX"] * camx) / 1024
         rdy = (vals["DY"] + vals["PLY"] * camx) / 1024
+        view = layout["view"]
         if flats:
             for y in range(hv):
                 r = 2 * y + 1 - hv
-                d = proj / abs(r)
+                d = view.flat_factor(r) * proj / abs(r)
                 fx, fy = px + d * rdx, py + d * rdy
                 u, v = int((fx - math.floor(fx)) * f), int((fy - math.floor(fy)) * f)
                 part = flats["floor" if r > 0 else "ceiling"]
-                img[y][c] = flat_color(part["c4"][part["texels"][v][u]], row_scale(y, hv, layout["shade"], proj)[1])
+                img[y][c] = flat_color(part["c4"][part["texels"][v][u]],
+                                       row_scale(y, hv, layout["shade"], proj, view.flat_factor(r))[1])
         mx, my = int(px), int(py)
         ddx = abs(1 / rdx) if rdx else 1e30
         ddy = abs(1 / rdy) if rdy else 1e30
@@ -1084,11 +1169,12 @@ def ideal(g, scal, layout, w, h, T):
         ds = d * DS
         br = int(layout["shade"].bright / (ds + layout["shade"].fog))
         for y in range(hv):
-            v = tex / 2 + (2 * y + 1 - hv) * tex * ds / (proj * (1 << 16))
+            v = view.wall_offset(tex) / 4 + (2 * y + 1 - hv) * tex * ds / (proj * (1 << 16))
             if 0 <= v < tex:
                 img[y][c] = br * side_color(t["c4"][t["texels"][int(v)][u] - 1], side)
     if layout["things"]:
-        th.ideal(img, vals, layout["things"], layout["sprites"], wall_d, w, hv, layout["shade"], proj)
+        th.ideal(img, vals, layout["things"], layout["sprites"], wall_d, w, hv, layout["shade"], proj, layout["view"],
+                 layout.get("thing_xy"))
     if layout["weapon"]:
         F = scal["weapon"]
         layout["weapon"].overlay(img, g.evaluate(T, [F.node])[0].get(sem.key(F.signal), 0))
@@ -1161,11 +1247,12 @@ def main():
     ap.add_argument("--no-weapon", action="store_true", help="leave out the weapon in front of the view")
     quality_arg(ap)
     shading_args(ap)
+    view_args(ap)
     a = ap.parse_args()
     w, h = map(int, a.size.lower().split("x"))
     g, b, cols, rows, scal, layout = build(w, h, a.substation_quality, a.tex, a.flat, None if a.no_things else th.THINGS,
                                            Shading.from_args(a), None if a.no_hud else scripted_hud,
-                                           None if a.no_weapon else scripted_weapon)
+                                           None if a.no_weapon else scripted_weapon, view=View.from_args(a))
     data = b.to_json()
     data["fsim"] = {"ticks": a.ticks, "doc": f"raycaster M3 {w}x{h}"}
     gen = HERE / "gen"

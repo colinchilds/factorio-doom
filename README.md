@@ -26,12 +26,16 @@ The tools so far:
   reference.
 - **The game** (`demos/game.py`): the raycaster driven by a chest input pad (god mode, drop
   items with Z): walk, turn (slowly at first, for aiming), slide along walls. Freedoom monsters
-  and items stand on the map (`demos/things.py`), hidden behind nearer walls; monsters are solid
-  and hurt you up close, items are picked up (`demos/touch.py`). A Freedoom status bar (`demos/hud.py`) shows
+  and items stand on the map (`demos/things.py`), hidden behind nearer walls, and items are picked
+  up (`demos/touch.py`). Monsters (`demos/monsters.py`) sleep until they see you in front of them
+  or get shot, then walk at you around walls, and attack on Doom's timing: the zombieman shoots
+  (often missing at range), the imp scratches up close and throws fireballs (no projectiles yet:
+  half of them hit). Any hit makes a monster flinch, which stops its attack, so punching works. A Freedoom status bar (`demos/hud.py`) shows
   ammo, health, armor and the face. Seven Freedoom weapons (`demos/weapons.py`): the gun in front
   of the view, "next weapon" switches, fire plays Doom's animation and uses ammo. Shots hit the
   nearest live monster in the middle of the view (`demos/combat.py`), which flinches with its
-  pain frame and dies with Freedoom's death animation, leaving a corpse.
+  pain frame and dies with Freedoom's death animation, leaving a corpse. At 0 health you're dead
+  (frozen, gun lowered); press Use to start a new game.
 - **Demos** (`demos/`): `gradient.py` builds a 16×16 lamp screen laid out like the planned
   renderer's row stage. fsim and the game agree on it lamp for lamp.
 
@@ -74,7 +78,10 @@ python3 demos/game.py --size 160x100 --no-hud      # without the status bar: the
 python3 demos/game.py --size 160x100 --no-weapon   # without the weapon in front of the view
 python3 demos/weapons.py                           # weapon timelines and the overlay's cost per size
 python3 demos/game.py --size 160x100 --turn-slow 1 --turn 4 --turn-ramp 18   # turning: per tick, slow then fast
+python3 demos/game.py --size 160x100 --fov 90 --aspect 1.2 --eye 40   # Doom's view (default: 67 degrees, 1.2, 40)
+python3 demos/game.py --size 160x100 --aspect 0 --eye 64   # the view before 2026-11-03 (squat, eye half way up)
 python3 harness/run.py --warmup 60 out/dir -o dump.json   # deep pipelines: settle before t0
+python3 harness/run.py --dlc --warmup 60 --every 2 out/dir -o dump.json   # long runs: record every 2nd tick (memory)
 # Substations default to legendary (28x28 supply, fewer dead pixels). The screen needs Space Age
 # (quality lanes), so game checks run with --dlc: harness/run.py --dlc --bench 30 demos/gen/raycast_160x100.json
 

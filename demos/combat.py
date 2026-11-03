@@ -15,14 +15,15 @@ Monster state (bus, per thing index, held by deciders reading the bus like the w
     DMG_i    damage taken. At a weapon's shot ticks (the same A values and ammo checks as its spend
              decider), AIM = i + 1 (and CLOSE for the fist) and alive -> DMG_i += the weapon's
              damage (Doom's mean; no randomness, no spread: every shotgun pellet hits).
-    MS_i     animation clock: 0 standing, 1..PL pain (a hit from standing that doesn't kill),
-             DEATH.. dying (the tick after DMG_i reaches the monster's health), then the corpse
-             frame at CORPSE, held. Doom's state durations (info.c), tics converted to ticks.
+    MS_i     its clock, run by monsters.py since 2026-11-03 (before: here, pain only from
+             standing): 1..PL pain (any hit that doesn't kill), DEATH.. dying (the tick after DMG_i
+             reaches the monster's health), then the corpse frame at CORPSE, held; walking and
+             attacking above. Doom's state durations (info.c), tics converted to ticks.
 The raycaster shows frame(MS_i): a lookup on the port added to the standing frame's id
-(things.column_stage `frame`). Dead monsters stop hurting the player and stop being solid
-(touch.py, game.player_graph).
+(things.column_stage `frame`). Dead monsters stop attacking and stop being solid (monsters.py,
+game.player_graph).
 
-`step` is the same rules in plain Python.
+`step` is the damage rules in plain Python.
 """
 import pathlib
 import sys
@@ -89,10 +90,13 @@ def hp(name):
 
 
 def frame(name, ms):
-    """The frame of a monster standing as `name`, at clock ms."""
+    """The frame of a monster standing as `name`, at clock ms (monsters.py: walking, attacking)."""
+    import monsters  # noqa: E402 (it imports this module)
     t = TYPES[name[:4]]
     if ms <= 0:
         return name
+    if ms >= monsters.FRESH:
+        return monsters.frame(name, ms)
     if ms < DEATH:
         return _seq(t["pain"], ms - 1)
     if ms < corpse(name[:4]):
@@ -101,8 +105,9 @@ def frame(name, ms):
 
 
 def clock_values(name):
+    import monsters  # noqa: E402
     t = name[:4]
-    return [0] + list(range(1, pain_len(t) + 1)) + list(range(DEATH, corpse(t) + 1))
+    return [0] + list(range(1, pain_len(t) + 1)) + list(range(DEATH, corpse(t) + 1)) + monsters.clock_values(name)
 
 
 def frames(things):
@@ -193,7 +198,7 @@ def logic(things, W, A, ammo, start):
     out = [("damage hold", sem.decider_spec([c(DMG[ms[0]], ">=", 0, RED)], [sem.out(DMG[i], networks=RED) for i in ms]), "bus")]
     for i in ms:
         name = things[i][2]
-        H, t = hp(name), name[:4]
+        H = hp(name)
         alive = c(DMG[i], "<", H, RED, "and")
         by_damage = {}
         for wi, s, d in _shots():
@@ -203,18 +208,6 @@ def logic(things, W, A, ammo, start):
             for wi, s in lst:
                 conds += shot(i, wi, s, not conds) + [alive]
             out.append((f"damage {i} {d}", sem.decider_spec(conds, [sem.out(DMG[i], constant=d)]), "bus"))
-        conds = []
-        for wi, s, d in _shots():
-            if d < H:
-                conds += shot(i, wi, s, not conds) + [c(DMG[i], "<", H - d, RED, "and"), c(MS[i], "=", 0, RED, "and")]
-        if conds:
-            out.append((f"pain {i}", sem.decider_spec(conds, [sem.out(MS[i], constant=1)]), "bus"))
-        out.append((f"die {i}", sem.decider_spec([c(DMG[i], ">=", H, RED), c(MS[i], "<", DEATH, RED, "and")],
-                                                 [sem.out(MS[i], constant=DEATH)]), "bus"))
-        adv = [c(MS[i], ">=", 1, RED), c(MS[i], "<", pain_len(t), RED, "and"), alive,
-               c(MS[i], ">=", DEATH, RED, "or"), c(MS[i], "<", corpse(t), RED, "and")]
-        out.append((f"anim {i}", sem.decider_spec(adv, [sem.out(MS[i], networks=RED), sem.out(MS[i], constant=1)]), "bus"))
-        out.append((f"corpse {i}", sem.decider_spec([c(MS[i], "=", corpse(t), RED)], [sem.out(MS[i], networks=RED)]), "bus"))
     return out
 
 
@@ -223,29 +216,20 @@ def alive_terms(things, i):
     return [(DMG[i], "<", hp(things[i][2]))]
 
 
-def step(things, W, A, ammo, aim, close, dmg, ms):
-    """The rules in plain Python: the next (dmg, ms) lists (per thing index) from this tick's bus.
-    ammo: {type: count}."""
+def step(things, W, A, ammo, aim, close, dmg):
+    """The rules in plain Python: the next dmg list (per thing index) and the hit flags (per
+    monster, touch.monsters order) from this tick's bus. ammo: {type: count}."""
     w = wp.WEAPONS[W]
     tl = wp.timeline(w)
     fires = A in tl["fire"] and (not w["ammo"] or ammo[w["ammo"]] >= w["cost"])
-    dmg, ms = list(dmg), list(ms)
+    dmg = list(dmg)
+    hits = []
     for i in tc.monsters(things):
-        name = things[i][2]
-        H, t = hp(name), name[:4]
-        d0, m = dmg[i], ms[i]
-        hit = fires and aim == i + 1 and (close > 0 or w["name"] not in MELEE_WEAPONS) and d0 < H
+        hit = fires and aim == i + 1 and (close > 0 or w["name"] not in MELEE_WEAPONS) and dmg[i] < hp(things[i][2])
         if hit:
-            dmg[i] = d0 + DAMAGE[w["name"]]
-        if d0 >= H:
-            ms[i] = DEATH if m < DEATH else min(m + 1, corpse(t))
-        elif hit and m == 0 and dmg[i] < H:
-            ms[i] = 1
-        elif 1 <= m < pain_len(t):
-            ms[i] = m + 1
-        else:
-            ms[i] = 0
-    return dmg, ms
+            dmg[i] += DAMAGE[w["name"]]
+        hits.append(int(hit))
+    return dmg, hits
 
 
 def _wall(px, py, rx, ry, is_wall, grid):
@@ -264,17 +248,17 @@ def _wall(px, py, rx, ry, is_wall, grid):
             return d
 
 
-def ideal_aim(things, px, py, angle, dmg, is_wall, grid, w):
+def ideal_aim(things, px, py, angle, dmg, is_wall, grid, w, plane=676, xy=None):
     """The hitscan in floats, independently of the circuit: (aim, close, margin) for the player at
     (px, py) tiles facing `angle` (radians), dmg per thing index, on a w-column screen (the wall
     test uses column w // 2's ray, as the circuit does). margin: how far (in tiles) the nearest
     decision boundary is (|L| vs HIT_R, depth vs the wall or another monster; 0 when the
     neighbouring columns' walls disagree, a ray grazing a corner), so callers can skip near-ties
-    that fixed-point rounding may decide either way."""
+    that fixed-point rounding may decide either way. plane: the camera plane (raycast.View); xy:
+    {i: (x, y)} tiles for monsters that moved."""
     import math
-    from raycast import PLANE
     dx, dy = math.cos(angle), math.sin(angle)
-    pl = PLANE / 1024
+    pl = plane / 1024
 
     def wall(c):
         camx = ((2 * c + 1 - w) * 1024 // w) / 1024
@@ -286,7 +270,8 @@ def ideal_aim(things, px, py, angle, dmg, is_wall, grid, w):
     for i in tc.monsters(things):
         if dmg[i] >= hp(things[i][2]):
             continue
-        rx, ry = things[i][0] - px, things[i][1] - py
+        tx, ty = (xy or {}).get(i, things[i][:2])
+        rx, ry = tx - px, ty - py
         a, lat = rx * dx + ry * dy, ry * dx - rx * dy
         margin = min(margin, abs(abs(lat) - r))
         if abs(lat) < r and 0 < a:

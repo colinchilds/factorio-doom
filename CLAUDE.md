@@ -173,8 +173,8 @@ Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► sp
 
 7. **Things (M4 sprites, `demos/things.py`, 2026-11-01):** monsters and items at map positions
    (`THINGS`, up to 8), Freedoom frames on the walls' texel grid (STEX = 64 per tile) in a box of
-   32 rows from eye level to the floor, so only the lower half of the screen has thing rows. The
-   module docstring has the formulas.
+   32 rows from 64 units up to the floor (eye level at its top until item 14 lowered the eye, so
+   only the lower half of the screen had thing rows). The module docstring has the formulas.
    - **Per thing (scalars):** depth `alpha = rx DX + ry DY` and lateral `L = ry DX - rx DY` (DX,
      DY, -DY lookups on green, shared by every thing's products; on one wire with rx the compiler
      copied the table per thing). Per column `U = camx * (alpha / 1551) - L + C` is the box column
@@ -289,10 +289,9 @@ Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► sp
    - **Hidden when gone:** the raycaster reads GONE_i on its port and adds `things.HIDE` (-2^23)
      to the item's depth (one more term on alpha's wire, delayed to meet the products), so both
      leaves fail NEAR and it isn't drawn. No latency.
-   - **Pain:** a bus clock COOL (`signal-P`): a monster within REACH (1 tile per axis), COOL = 0
-     and alive -> COOL = COOLDOWN (40); it counts down (copy + -1, while > 1: see the rules below). The tick after it starts
-     (COOL = COOLDOWN) tables over (armor, health) take DAMAGE 9: green armor takes SAVE 3 while
-     it has that much, and health stops at 0 (the face shows dead; nothing else happens yet).
+   - **Pain (until 2026-11-03, replaced by monster attacks, item 15):** a bus clock COOL: a
+     monster within a tile, COOL = 0 and alive -> COOL = 40, counting down; at its start tables over
+     (armor, health) took 9.
    - **Solid monsters:** their boxes join the walls in the corner deciders (`player_graph`), at
      the collision box's half-size (88, so the player's box can't straddle one between its
      corners). You slide along them like walls.
@@ -327,7 +326,7 @@ Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► sp
      broadcast onto the dleaf's green input (`column_stage` `frame` hook); `combat.frames` adds the
      pain/death frames to `things.load`. The dying imp's box is wider (32 texels), so Zt drops one
      depth bit (`qd`) to keep a hidden item's key in range.
-   - **Dead monsters** stop hurting (touch's pain start) and stop being solid (the corner deciders
+   - **Dead monsters** stop attacking (item 15) and stop being solid (the corner deciders
      test DMG < health; the reference feeds them the bus, not just REG).
    - **Fist reach is a tile:** Doom's is 84 units to the centre, but our monster boxes carry the
      latency allowance and stop the player 0.53–0.69 tile away per axis.
@@ -336,7 +335,7 @@ Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► sp
      deciders; their chain joins the bus through one writer's own input (it reads the bus).
    - **Checks:** `combat.step` (plain Python) against the bus every tick; the aim against a float
      hitscan (`combat.ideal_aim`: DDA along the middle column's ray, as the circuit) from the bus τ earlier, skipping near-ties (corner grazes,
-     within 0.02 tile). The scripted fight (`game.COMBAT_SCRIPT`, ticks 700–1340): shotgun the
+     within 0.02 tile). The scripted fight (`game.COMBAT_SCRIPT`, ticks 700–1340; `FIGHT_SCRIPT` since item 15): shotgun the
      zombieman (dies), chaingun the imp (four bullets, two pain flinches), switch to the fist while
      walking up to it, two punches (dies).
 
@@ -390,7 +389,127 @@ Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► sp
      chunk's constants (1,920 lanes) failed to import until `Blueprint.constant` split them into
      sections.
 
-Still to come (M4): enemies, doors; see "Next steps".
+13. **Death and restart (`demos/game.py`, 2026-11-02, user request):** at health 0 the player is
+    dead: frozen, the gun lowered, the face dead. Use starts a new game.
+   - **Dead** = `HEALTH <= -hud.START["health"]` on the bus.
+     - Walking stops because every corner decider gets one more OR clause, "dead", so all four
+       corners read as walls. The corners run lat ticks behind REG, which also covers the
+       restart's jump back to SPAWN.
+     - Turning stops through a dead-flag decider (`dead_flag`, next to REG). It reads the bus on
+       red, and its green output joins the turn counter's network, where the turn deciders require
+       `DEAD` (`signal-O`) = 0. The bus is red-only, so the flag needs a network of its own.
+     - The gun lowers and stays down, as in Doom's A_Lower, and fire and next-weapon are ignored
+       (`weapons.logic(..., health)`, `weapons.step(..., alive)`).
+   - **Restart:**
+     - A relay puts Use (`signal-U`, pad or keyboard) on the bus. While dead, a decider next to REG
+       outputs `RESTART` (`signal-Z`) for a tick. Its red output is on the bus and its green output
+       on REG's green input.
+     - **REG is now a decider,** `RESTART = 0 -> Everything`: its own output on green, the
+       increments on red. It drops everything on that tick, so REG is exactly 0 the next tick
+       (negating REG into its input would lag and race the increments).
+     - Every bus writer gets `RESTART = 0` ANDed into each clause (`gated`), so everything the bus
+       holds drops to 0 together: weapon, animation, queue, GONE, COOL, DMG, MS. Items come back
+       and monsters come back alive.
+     - The REG writers need no gate: REG drops its input that tick, and none of them fires for a
+       dead player.
+   - **Cost:** two deciders and a relay. No latency.
+   - **Checks:** game `--verify` ran `DEATH_SCRIPT` after the fight (default `--ticks` 2280; part of `FIGHT_SCRIPT` since item 15):
+     - Walk up to the zombieman and die there.
+     - While dead, press fire, switch, turn and walk; all are ignored.
+     - Press Use, then walk and fire.
+
+     It checks the restart flag against its rule, that REG and every bus state are 0 after a
+     restart, and that nothing moves while dead (once the pipeline has caught up).
+   - **Results:**
+     - 0 differ at 64×40, 160×100 and 320×200.
+     - The 64×40 game matches a Space Age game on 23,282,167 checks (2,280 ticks,
+       `--dlc --warmup 60`, about 28 minutes and a 9 GB dump).
+     - 320×200: 10,740 combinators, 1.02 ms per tick in Space Age (300-tick median), fully
+       powered.
+
+14. **View geometry (`raycast.View`, 2026-11-03, user request: "they look kind of silly as short
+    as they are"):** the monsters were Doom's size against the walls, but looked squat and short
+    for two reasons. The eye was half way up the 128-unit wall (Doom's is at 41 units, below an
+    imp's 56, so monsters stand above the eye line). And pixels were 0.83 as tall as wide at 16:10
+    with the 67° view (proj = H), where Doom's 320×200 on a 4:3 screen shows them 1.2 times taller.
+    - **Build parameters:** `--fov` (degrees, default the old 66.85: plane 676), `--aspect` (default
+      1.2; 0 = the old proj = H), `--eye` (Doom units, default 40; even, eye × tex a multiple of 32).
+      proj = aspect × W × 512 / plane rows per tile: 145 at 160 wide (100 before), so monsters and
+      walls are about 1.45 times taller on screen, same width. `--aspect 0 --eye 64` gives a
+      byte-identical blueprint to before. Previews of 90°/1.2/40 (Doom's own) and 75° looked
+      narrower; the user can pick.
+    - **Walls:** the wall covers -OV <= V < 4 tex - OV with OV = 4 tex (1 - e) (mux and bounds are
+      constants); the shift's (V + OV) AND 28 takes OV mod 32 as a constant on its green input.
+    - **Flats:** the floor's distance is 2e proj / |r|, the ceiling's 2(1 - e) proj / |r|
+      (`View.flat_factor` in K_y and the brightness): constants.
+    - **Things above the eye:** the 32-row box is unchanged (64 units up to the floor); its row at
+      eye level is te = (64 - eye) / 2 = 12. Upper chunks now get thing rows too (as far up as a
+      thing's top reaches at NEAR): t = te - 1 + Q with Q truncated toward 0 (te + Q below), the
+      offsets as constants on P's input (`2 ^ Each`) and on Vs's network, so the kill and the texel
+      always pick the same row.
+    - **Cost:** about 70 more combinators at 64×40 (the upper chunks' thing rows); no latency.
+    - **Checks:** raycast `--verify` 0 differ at 64×40; the game checks below.
+
+15. **Monsters (`demos/monsters.py`, 2026-11-03, user request: they stood still and hurt on contact
+    every 40 ticks, so close enough to punch was close enough to die):** Doom's behaviour,
+    simplified. The module docstring has the details; `monsters.step` is the same rules in Python.
+    - **Two networks:** positions MX, MY (offsets from the spawn) and the clock MS stay on the bus
+      (the raycaster and the player's corners read them). Everything else is on M, a network of its
+      own around a pole below the turn deciders (green): the player's offset DX, DY (one arith
+      each, absolute: the spawn difference rides on its green input), DX², DY², 8 corner flags, the
+      sight line, random numbers, the attack flag, the last DMG (DMG > LD is a hit), the detour,
+      the damage queue PD and its phase. The bus's names were running out: the raycaster needs
+      about 77 of the 146 virtual signals for its scalars, and reserves every bus signal.
+    - **Sight:** per monster, 63 points between it and the player as lanes (two products of the
+      bus's positions by constant vectors, plus a constant), a 2D range lookup over the wall
+      rectangles (x on red, y on green) whose named else-output counts the clear points (SEE =
+      63 is in sight). Two ticks deep, outputs onto M. The compiler's evaluator learned named
+      outputs under Each conditions (`decider_each` case: constant × matching lanes).
+    - **Waking:** in sight and in front (`FACING`, a half plane; ours face away from the spawn), or
+      within a tile and in sight, or shot.
+    - **Chase:** the walk clock (Doom's frames) moves the monster 3 (imp) or 2 (zombieman) 1/FP
+      tiles a tick toward the player: along the major axis (DX² vs DY²) and the minor one, stopping
+      at STOP (176) on both axes. Each step tests its two leading corners (one flag set per step
+      axis, BOX 56 ahead and SIDE 46 across: one tick of stale flags and a simultaneous step on the
+      other axis, and room to slide along a wall). A wall corner blocking the major axis on one
+      side: step sideways off it first. Both corners blocked and the minor axis no help: a detour
+      DT along the wall (side by random number, turning back at a dead end) until the way opens
+      (Doom keeps a chase direction for a while). No monster-monster collision yet.
+    - **Attacks:** after a full walk cycle (after waking, an attack or a flinch), an attempt at each
+      of Doom's A_Chase ticks while in sight, with Doom's chance by distance band
+      (P_CheckMissileRange). The attack frames, then at the shot frame, if still in sight: the
+      zombieman hits by Doom's spread (64% within a tile down to 10% far off) for 9, the imp
+      scratches within a tile (always) or throws a fireball (half hit: no projectiles yet) for 12.
+      Random numbers: an LCG on M (the arith reads its constant on red, M on green) times a
+      constant per monster.
+    - **Pain:** any hit that doesn't kill restarts the pain frames from any live state (Doom's pain
+      chance at 100%), then a fresh walk cycle: punching an imp every ~30 ticks keeps it from ever
+      attacking (the scripted fight shows it). Pain, death and the corpse moved here from
+      combat.py.
+    - **Damage:** each hit adds to PD; every other tick (PH, since REG's health on the bus is a
+      tick stale; PH toggles only while PD > 0: a free-running toggle came out a tick out of phase
+      in the game, whose warm-up runs a tick longer than fsim's) 3 of it is applied: green armor takes 1 while it lasts, health stops at 0.
+      Simultaneous hits queue. touch.py's contact damage (COOL) is gone.
+    - **Raycaster:** a monster's rx = (MX - X) + (spawn - SPAWN), one op from the port like a
+      standing thing's (`things.column_stage` `pos` hook); walk and attack frames go through the
+      same MS lookup as pain and death (11 more frames). The player's corner deciders test monster
+      boxes on DX, DY (green, M), the box grown by MBOX 25 for their age.
+    - **Cost (64×40):** 8,823 combinators (7,652 before), most of it the new sprite frames' lookups;
+      about 200 monster deciders. No latency.
+    - **Checks:** game `--verify` checks M against fsim every tick, the rules (`monsters.step`)
+      against the bus and M (sight lines from `los_count`), that no monster box enters a wall, and
+      that the player never touches a live monster where it is now. The scripted fight
+      (`FIGHT_SCRIPT`, `--ticks` 2340) is described above it.
+    - **Results:**
+      - fsim: 0 differ at 64×40, 160×100 and 320×200 (REG, bus, M, the rules, aim, frames); no
+        monster box in a wall, the player never touching a live monster.
+      - The 64×40 game matches a Space Age game on 13,323,638 checks (2,340 ticks recorded every
+        second tick, `harness/run.py --dlc --warmup 60 --every 2`, about 14 minutes and a 5 GB dump).
+      - Combinators: 8,823 / 10,003 / 12,197 at 64×40 / 160×100 / 320×200 (7,652 / 8,728 / 10,740
+        before). 320×200: 78,155 entities, 1.14 ms per tick in Space Age (1.02 before), fully
+        powered; blueprint string 7.3 MB.
+
+Still to come (M4): doors; see "Next steps".
 
 Earlier notes that still hold:
 
@@ -529,6 +648,9 @@ The game is the referee, and fsim is the fast development loop:
    - Modes:
      - `--bench TICKS`: time each blueprint alone, with no recording; prints median ms per tick.
      - `--signals`: dump the signal order.
+     - `--every N` (2026-11-03): record only every N-th tick (the rest are empty rows, which
+       `fsim conform` skips). The 64×40 game over 2,340 ticks with monsters (about 11 GB of rows,
+       held in Lua and serialized at once) got Factorio killed after 24 minutes; `--every 2` fits.
      - `--discover`: export a blueprint with every option set, to learn the JSON field names.
    - Scripted input: a case's `fsim.inserts` (`[k, entity_number, item, count]`, negative
      removes) puts items into a chest in on_tick at t0 + k, after row k is recorded. fsim applies
@@ -698,13 +820,14 @@ The blueprint stays vanilla; the mod is an optional input path ("the input is so
 
 The raycaster driven by the pad: walk, turn, slide along walls. Screen, then the pad on its
 right, then the player logic below the pad.
-- **State:** one register REG (`Each + 0`, green self-loop) holds X, Y (displacement from
+- **State:** one register REG (green self-loop; a decider `RESTART = 0 -> Everything` since
+  the restart, item 13, before that `Each + 0`) holds X, Y (displacement from
   SPAWN) and R (unbounded turn, in quarter view angles: the view angle is ((R >> 2) + A0) & 255).
   - **Status bar values (2026-11-02):** REG also holds HEALTH (`signal-H`), ARMOR (`signal-V`)
     and the ammo counts (bullets `signal-B`, shells `J`, rockets `K`, cells `C`) as offsets from
     `hud.START` (every weapon, ammo below Doom's caps), which `hud_from_port` adds on the wire
     (`Each + Each` with a constant).
-  - **Contact state (2026-11-02):** the items' GONE flags and the pain clock COOL on the bus
+  - **Contact state (2026-11-02):** the items' GONE flags (and until item 15 the pain clock COOL) on the bus
     (architecture item 10); their deciders join the weapon columns (bus writers, then the REG
     writers in columns of `SPEND_ROWS`, snaking so the chain stays short).
   - **Weapon state (2026-11-02):** W (`signal-G`) and A (`signal-T`) on the state bus, plus the
@@ -819,6 +942,9 @@ Done:
   animations and ammo use.
 - M4 thing contact (architecture item 10): pickups, monster pain, solid monsters; the turn ramp.
 - M4 shooting (architecture item 11): hitscan, monster health, pain and death animations, corpses.
+- Death and restart (architecture item 13): frozen at health 0, Use starts a new game.
+- View geometry (architecture item 14): Doom's pixel aspect and eye height, so monsters stand tall.
+- Monsters (architecture item 15): wake, chase around walls, attack on Doom's timing, flinch.
 - Chunks, layout and latency (architecture item 12): six rows per network on signal qualities
   (Space Age), about half the combinators, layout by concept, the bus on a substation row, 17-tick
   raycaster.
@@ -827,9 +953,12 @@ Commit only when the user asks.
 
 ## Next steps (in order)
 
-1. **M4, the rest:** things are drawn (item 7) and can be shot (item 11); next are enemies
-   (positions from a state register instead of constants: alpha/L from scalars per thing, walk and
-   attack frames through the same frame lookup as pain and death), doors.
+1. **M4, the rest:** things are drawn (item 7), can be shot (item 11) and move and attack (item
+   15); next are doors.
+   - Monster follow-ups: imp fireballs as projectiles (things that move; two more things need a
+     fourth tree level, a tick, or fewer items), monsters blocking each other, waking on the
+     player's shots (Doom's noise), Doom's pain chance and damage rolls (the LCG is there), sprite
+     rotations (they always face the camera), more monster types.
    - Shooting follow-ups: Doom's randomness (damage rolls, pain chance), shotgun spread, rocket
      splash, bullet puffs, more than 8 things. M5 (stretch): angled walls, varying heights.
    - HUD follow-ups: the face looking left/right and its pain/ouch frames, keys, owned weapons
@@ -838,17 +967,47 @@ Commit only when the user asks.
      pickups (weapons owned, ammo); the walking bob (it moves sideways too: about 10× the
      pictures, or a different way to draw the gun); Doom's muzzle light (A_Light1 brightens the view: a brightness term on
      the bus); the chainsaw and super shotgun.
-   - Contact follow-ups: death (freeze the controls at health 0, and a restart: REG can't be
-     cleared by itself, it needs every value negated into its input), Doom's blue armor class
-     (absorbs a half; one class now), the face's ouch frame on a hit.
+   - Contact follow-ups: Doom's blue armor class (absorbs a half; one class now), the face's ouch
+     frame on a hit. Death follow-ups (item 13): the view dropping to the floor (Doom lowers the
+     eye), a red tint on hits, the music restarting on a restart (M6).
    - Thing follow-ups: more than 8 things (a fourth tree level costs a tick, or sort by depth on
-     scalars); a second nearest layer so overlapping things don't cut each other; things taller
-     than eye level (they'd need upper-half rows).
-2. **Possible M3 follow-ups:** fix the mirrored faces; fewer strip deciders (4,096 of the
+     scalars); a second nearest layer so overlapping things don't cut each other.
+2. **M6: audio (planned 2026-11-02, user request).** Music on a loop and sound effects, with
+   vanilla programmable speakers driven by the circuit.
+   - **Music:**
+     - Find MIDI files and convert them to blueprints with
+       [MIDItorio](https://miditorio.com) or something like it. MIDItorio turns a MIDI file into a
+       blueprint that keeps the song in chests or combinators as memory and plays it on
+       programmable speakers.
+     - Freedoom's own soundtrack (BSD) is in its WAD as MUS lumps, which convert to MIDI.
+       Original or freely licensed music only, as for the art; no id Software music.
+     - Check what a converter emits against Factorio 2.1 before relying on it, and keep the result
+       vanilla.
+   - **Wiring:**
+     - The song plays on a loop from its own clock.
+     - Ideally it restarts on a restart (item 13): reset its clock from `RESTART` on the bus,
+       for example with a gated clock like the bus holds. Not essential if it's hard.
+   - **Sound effects:** short note patterns (the drum kit and similar instruments), each triggered
+     by an event on the bus:
+     - a shot: the spend deciders' A values;
+     - a pickup: GONE rising;
+     - pain: PD rising (monsters.py's damage queue);
+     - monster pain and death: MS starting;
+     - the weapon switch, and the player dying.
+
+     Freedoom's sound effects are samples, which speakers can't play, so these are our own MIDI
+     patterns or speaker notes.
+   - **To measure first** (conformance cases, as for everything else):
+     - what the speaker does with a signal held for several ticks (one note or a repeat);
+     - polyphony and the global-playback option, so the player hears it while zoomed in on the
+       screen;
+     - whether the instrument can come from the circuit, or needs one speaker per instrument;
+     - UPS for a few hundred speakers.
+3. **Possible M3 follow-ups:** fix the mirrored faces; fewer strip deciders (4,096 of the
    ~13,000 combinators at 160×100); different flats per room (needs the map cell per pixel, which
    the wrapping product throws away); a lower-cost flat path (the 32 word deciders per row are
    most of it).
-3. **Tooling as needed:** fsim speed for 320×200 work (about 70 ms per tick for the textured
+4. **Tooling as needed:** fsim speed for 320×200 work (about 70 ms per tick for the textured
    game without flats; lookups are about 100× slower than the game).
 
 ## Rules for working here

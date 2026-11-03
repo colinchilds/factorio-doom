@@ -252,11 +252,12 @@ def _decider(spec, red, green, cache=None):
     res = {}
     if each_nets:
         outs, else_outs = spec["outputs"], spec.get("else_outputs", [])
+        named = any(o["signal"]["name"] != EACH for o in outs + else_outs)
         for o in outs + else_outs:
-            if o["signal"]["name"] != EACH:
-                raise NotImplementedError("named output under Each conditions")
+            if o["signal"]["name"] in (EVERYTHING, ANYTHING):
+                raise NotImplementedError(f"{o['signal']['name']} output under Each conditions")
         first = groups[0][0]
-        if (cache is not None and len(groups) == 1 and not else_outs and first[0] is CMP["="]
+        if (cache is not None and len(groups) == 1 and not else_outs and not named and first[0] is CMP["="]
                 and first[1][0] and not first[2][0] and first[2][1] != 0):
             # A key lookup: only lanes whose value equals the key can pass.
             cand = _index(first[1][1], cache).get(first[2][1], [])
@@ -270,7 +271,17 @@ def _decider(spec, red, green, cache=None):
                 (passing if holds(lane) else failing).append(lane)
         for lst, os_ in ((passing, outs), (failing, else_outs)):
             for o in os_:
-                if o.get("copy_count_from_input", True):
+                if o["signal"]["name"] != EACH:
+                    # A named output under Each conditions (decider_each case): the constant times
+                    # the matching lanes, or the sum of their values when copying.
+                    if o.get("copy_count_from_input", True):
+                        src = _net_cached(red, green, o.get("networks"), cache)
+                        v = i32(sum(src.get(lane, 0) for lane in lst))
+                    else:
+                        v = i32(o.get("constant", 1) * len(lst))
+                    if lst:
+                        add_into(res, {key(o["signal"]): v})
+                elif o.get("copy_count_from_input", True):
                     src = _net_cached(red, green, o.get("networks"), cache)
                     for lane in lst:
                         add_into(res, {lane: src.get(lane, 0)})

@@ -259,22 +259,25 @@ def _weights(X, src, dst):
     return [(s, min(b, s + 1) - max(a, s)) for s in range(int(a), min(src, int(b) + 1)) if min(b, s + 1) > max(a, s)]
 
 
-def step(W, A, D, fire, nxt, ammo):
+def step(W, A, D, fire, nxt, ammo, alive=True):
     """The rules in plain Python (independent of logic()): the next (W, A, D) and the ammo spent
-    {type: amount}, from this tick's state. ammo: {type: count}."""
+    {type: amount}, from this tick's state. ammo: {type: count}. A dead player's gun lowers and
+    stays down (Doom's A_Lower), and fire and next are ignored."""
     wp, tl = WEAPONS[W], timeline(WEAPONS[W])
     have = not wp["ammo"] or ammo[wp["ammo"]] >= wp["cost"]
     spent = {wp["ammo"]: wp["cost"]} if wp["ammo"] and A in tl["fire"] and have else {}
-    D2 = D + (1 if nxt > 0 else 0)
+    D2 = D + (1 if nxt > 0 and alive else 0)
     if A >= LOWER:   # switching
         if A == BOTTOM:
             if D > 0:
                 return (W + 1) % len(WEAPONS), A, D2 - 1, spent
+            if not alive:
+                return W, A, D2, spent
             return W, RAISE, D2, spent
         if A == RAISE_END:
             return W, 0, D2, spent
         return W, A + 1, D2, spent
-    if D > 0:
+    if D > 0 or not alive:
         return W, LOWER, D2, spent
     if (A == 0 or A == tl["R"]) and fire > 0 and have:
         return W, 1, D2, spent
@@ -286,13 +289,17 @@ def step(W, A, D, fire, nxt, ammo):
 # ---------------------------------------------------------------------------------------------
 # Game logic: decider specs for the state machine (demos/game.py places and wires them).
 
-def logic(W, A, D, FIRE, NEXT, ammo, start):
+def logic(W, A, D, FIRE, NEXT, ammo, start, health=None):
     """Deciders reading the state bus (red), as [(label, spec, target)], target "bus" (W, A and D,
     next tick) or "reg" (ammo spent, into the player register). ammo: {type: signal}, holding
-    the count minus start[type]. weapons.step is the same rules in plain Python."""
+    the count minus start[type]. health: (signal, offset): the player is dead at signal <= -offset;
+    then the gun lowers and stays down, and fire and next are ignored. weapons.step is the same
+    rules in plain Python."""
     lines = [timeline(wp) for wp in WEAPONS]
     n = len(WEAPONS)
     c = sem.cond
+    alive = [c(health[0], ">", -health[1], RED, "and")] if health else []
+    dead = (lambda first: [c(health[0], "<=", -health[1], RED, None if first else "and")]) if health else None
 
     def have(wi, first=False):
         """There's ammo for weapon wi's shot (nothing for the fist)."""
@@ -305,7 +312,7 @@ def logic(W, A, D, FIRE, NEXT, ammo, start):
     copy = lambda s: sem.out(s, networks=RED)  # noqa: E731
     # Queued switches: D + (next pressed) - (a step at the bottom).
     out.append(("queue hold", sem.decider_spec([c(D, ">", 0, RED)], [copy(D)]), "bus"))
-    out.append(("queue add", sem.decider_spec([c(NEXT, ">", 0, RED)], [sem.out(D, constant=1)]), "bus"))
+    out.append(("queue add", sem.decider_spec([c(NEXT, ">", 0, RED)] + alive, [sem.out(D, constant=1)]), "bus"))
     out.append(("queue take", sem.decider_spec([c(A, "=", BOTTOM, RED), c(D, ">", 0, RED, "and")],
                                                [sem.out(D, constant=-1)]), "bus"))
     # Weapon: steps (wrapping to 0: no output) at the bottom while switches are queued.
@@ -316,7 +323,7 @@ def logic(W, A, D, FIRE, NEXT, ammo, start):
     adv, start_c = [], []
     for wi, tl in enumerate(lines):
         L, R = tl["L"], tl["R"]
-        base = lambda: [c(W, "=", wi, RED, "or" if adv else None), c(D, "<=", 0, RED, "and")]  # noqa: E731
+        base = lambda: [c(W, "=", wi, RED, "or" if adv else None), c(D, "<=", 0, RED, "and")] + alive  # noqa: E731
         adv += base() + [c(A, ">=", 1, RED, "and"), c(A, "<", R, RED, "and")]
         if R < L:
             adv += base() + [c(A, ">", R, RED, "and"), c(A, "<", L, RED, "and")]
@@ -327,15 +334,17 @@ def logic(W, A, D, FIRE, NEXT, ammo, start):
                                  c(ammo[wp["ammo"]], "<", wp["cost"] - start[wp["ammo"]], RED, "and")]
         for at in (0, R):
             start_c += [c(W, "=", wi, RED, "or" if start_c else None), c(D, "<=", 0, RED, "and"),
-                        c(A, "=", at, RED, "and"), c(FIRE, ">", 0, RED, "and")] + have(wi)
+                        c(A, "=", at, RED, "and"), c(FIRE, ">", 0, RED, "and")] + have(wi) + alive
     adv += [c(A, ">=", LOWER, RED, "or"), c(A, "<", BOTTOM, RED, "and"),
             c(A, ">=", RAISE, RED, "or"), c(A, "<", RAISE_END, RED, "and")]
     out.append(("anim advance", sem.decider_spec(adv, [copy(A), sem.out(A, constant=1)]), "bus"))
     out.append(("anim start", sem.decider_spec(start_c, [sem.out(A, constant=1)]), "bus"))
-    out.append(("anim lower", sem.decider_spec([c(A, "<", LOWER, RED), c(D, ">", 0, RED, "and")],
+    or_dead = lambda first: [c(A, first[0], first[1], RED, "or")] + dead(False) if health else []  # noqa: E731
+    out.append(("anim lower", sem.decider_spec([c(A, "<", LOWER, RED), c(D, ">", 0, RED, "and")] + or_dead(("<", LOWER)),
                                                [sem.out(A, constant=LOWER)]), "bus"))
-    out.append(("anim down", sem.decider_spec([c(A, "=", BOTTOM, RED), c(D, ">", 0, RED, "and")], [copy(A)]), "bus"))
-    out.append(("anim raise", sem.decider_spec([c(A, "=", BOTTOM, RED), c(D, "<=", 0, RED, "and")],
+    out.append(("anim down", sem.decider_spec([c(A, "=", BOTTOM, RED), c(D, ">", 0, RED, "and")] + or_dead(("=", BOTTOM)),
+                                              [copy(A)]), "bus"))
+    out.append(("anim raise", sem.decider_spec([c(A, "=", BOTTOM, RED), c(D, "<=", 0, RED, "and")] + alive,
                                                [sem.out(A, constant=RAISE)]), "bus"))
     # Ammo: per weapon with ammo, at each shot's tick, if there's enough.
     for wi, (wp, tl) in enumerate(zip(WEAPONS, lines)):

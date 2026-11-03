@@ -1,6 +1,7 @@
-"""Thing contact (M4, 2026-11-02, user request): items are picked up when you walk over them, and a
-live monster hurts you while you stand close to it. Live monsters are also solid (game.player_graph
-adds their boxes to the wall corners). Dead ones (combat.py) are neither.
+"""Thing contact (M4, 2026-11-02, user request): items are picked up when you walk over them. Live
+monsters are solid (game.player_graph adds their boxes to the wall corners); dead ones (combat.py)
+aren't. Until 2026-11-03 a live monster also hurt you while you stood close to it (the pain clock
+COOL, DAMAGE every COOLDOWN ticks); monsters.py's attacks replaced that.
 
 Everything here reads the state bus (REG's red output, game.py) and is one tick deep, like the
 weapon logic:
@@ -12,11 +13,6 @@ weapon logic:
     effect   the same condition and the stat's value -> the increment into REG: min(amount,
              cap - value), as bit-sliced constant tables over value ranges (a decider can only copy
              or output constants, and the clamp needs the value).
-    COOL     the pain clock (bus): a monster within REACH, COOL = 0, alive -> COOL = COOLDOWN; it
-             counts down by one a tick (copy COOL + -1, while > 1).
-    damage   COOL = COOLDOWN (one tick after the hit started) -> health and armor decrements, also
-             tables over (armor, health): green armor takes a third (SAVE of DAMAGE) while it has
-             that much, and health stops at 0 (the face shows dead; nothing more happens yet).
 
 `step` is the same rules in plain Python, for game.py's check.
 """
@@ -32,12 +28,7 @@ from compiler.netlist import RED  # noqa: E402
 
 FP = 256
 GONE = [sig(f"signal-{i}") for i in range(8)]   # per thing index (only items use theirs)
-COOL = sig("signal-P")
 PICKUP = 80          # 1/FP tiles per axis, centre to centre: Doom's 16 + 20 units, a bit more
-REACH = FP           # a monster within a tile (per axis) hurts
-DAMAGE = 9           # per hit (an imp's scratch is 3d8)
-SAVE = 3             # of which green armor takes (Doom: a third)
-COOLDOWN = 40        # ticks between hits
 MONSTERS = {"TROO", "POSS"}
 # Sprite type -> (stat, amount, cap). Doom's numbers; armor "amount" sets it to the cap.
 ITEMS = {
@@ -71,16 +62,6 @@ def _box(x, y, spawn, r):
 def pickup_table(amount, cap):
     """[(lo, hi, increment)] over the stat's value (None = unbounded), below the cap."""
     return [(None, cap - amount, amount)] + [(v, v, cap - v) for v in range(max(0, cap - amount + 1), cap)]
-
-
-def damage_tables():
-    """[(armor lo, armor hi, health table, armor decrement)]; tables [(lo, hi, decrement)] over
-    health >= 1 (health stops at 0)."""
-    out = []
-    for alo, ahi, save in [(SAVE, None, SAVE)] + [(a, a, a) for a in range(SAVE - 1, 0, -1)] + [(None, 0, 0)]:
-        p = DAMAGE - save
-        out.append((alo, ahi, [(p, None, p)] + [(k, k, k) for k in range(1, p)], save))
-    return out
 
 
 class Logic:
@@ -136,7 +117,6 @@ class Logic:
     def specs(self):
         """[(label, spec, "bus" | "reg")], like weapons.logic: "bus" ones write the bus, "reg" ones
         REG's input."""
-        import combat  # noqa: E402 (combat imports this module)
         res = []
         its = items(self.things)
         if its:
@@ -150,35 +130,12 @@ class Logic:
                                                              [sem.out(GONE[i], constant=1)]), "bus"))
             cases = [(near, stat, lo, hi, m) for lo, hi, m in pickup_table(amount, cap)]
             res += self._bits(cases, self.sigs[stat], 1, f"pickup {i} {name}")
-        ms = monsters(self.things)
-        if ms:
-            conds = []
-            for i in ms:
-                x, y, _ = self.things[i]
-                conds += self._clause(_box(x, y, self.spawn, REACH) + [(COOL, "=", 0)] + self.alive()
-                                      + combat.alive_terms(self.things, i), not conds)
-            res.append(("pain start", sem.decider_spec(conds, [sem.out(COOL, constant=COOLDOWN)]), "bus"))
-            # > 1, not > 0: at 1 the two outputs would sum to 0, which the game reports as a 0-valued
-            # signal on the decider (fsim leaves it out); no output reads 0 all the same.
-            res.append(("pain clock", sem.decider_spec([sem.cond(COOL, ">", 1, RED)],
-                                                       [sem.out(COOL, networks=RED), sem.out(COOL, constant=-1)]), "bus"))
-            hit = [(COOL, "=", COOLDOWN)]
-            hcases, acases = [], []
-            for alo, ahi, htab, save in damage_tables():
-                arm = self._rng("armor", alo, ahi)
-                hcases += [(hit + arm, "health", lo, hi, m) for lo, hi, m in htab]
-                if save:
-                    acases.append((hit + self.alive(), "armor", alo, ahi, save))
-            res += self._bits(hcases, self.sigs["health"], -1, "damage health")
-            res += self._bits(acases, self.sigs["armor"], -1, "damage armor")
         return res
 
 
 def step(things, spawn, start, bus):
-    """The rules in plain Python. bus: {"SX", "SY", "health", "armor", ammo..., "gone": [..],
-    "cool", "dmg": [..]} (REG's offsets, as on the bus; dmg: each monster's damage taken, combat.py).
-    Returns (gone, cool, increments {stat: delta})."""
-    import combat  # noqa: E402
+    """The rules in plain Python. bus: {"SX", "SY", "health", "armor", ammo..., "gone": [..]} (REG's
+    offsets, as on the bus). Returns (gone, increments {stat: delta})."""
     val = {k: bus[k] + start[k] for k in start}
     alive = val["health"] > 0
     gone = list(bus["gone"])
@@ -190,17 +147,4 @@ def step(things, spawn, start, bus):
         if abs(dx) < PICKUP and abs(dy) < PICKUP and not bus["gone"][i] and alive and val[stat] < cap:
             gone[i] = 1
             inc[stat] = inc.get(stat, 0) + min(amount, cap - val[stat])
-    cool = bus["cool"] - 1 if bus["cool"] > 0 else 0
-    if bus["cool"] == 0 and alive:
-        for i in monsters(things):
-            x, y, _ = things[i]
-            if bus["dmg"][i] >= combat.hp(things[i][2]):
-                continue   # dead
-            dx, dy = bus["SX"] + spawn[0] - int(x * FP), bus["SY"] + spawn[1] - int(y * FP)
-            if abs(dx) < REACH and abs(dy) < REACH:
-                cool = COOLDOWN   # one start decider (an OR over the monsters)
-    if bus["cool"] == COOLDOWN and alive:
-        save = min(SAVE, max(val["armor"], 0))
-        inc["armor"] = inc.get("armor", 0) - save
-        inc["health"] = inc.get("health", 0) - min(DAMAGE - save, val["health"])
-    return gone, cool, {k: v for k, v in inc.items() if v}
+    return gone, {k: v for k, v in inc.items() if v}

@@ -144,6 +144,10 @@ end
 
 local function record(run, k)
   local row = {}
+  if k % (config.every or 1) ~= 0 then   -- --every: an empty row (fsim conform skips it)
+    run.rows[k + 1] = row
+    return
+  end
   for num, e in pairs(run.entities) do
     local t = e.type
     if t == "arithmetic-combinator" or t == "decider-combinator" or t == "selector-combinator" then

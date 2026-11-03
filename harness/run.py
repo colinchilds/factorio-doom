@@ -39,8 +39,8 @@ def lua_str(s):
     return "[==[" + s + "]==]"
 
 
-def write_cases(cases, warmup, mode="run"):
-    lines = [f"return {{ mode = {lua_str(mode)}, warmup = {warmup}, cases = {{"]
+def write_cases(cases, warmup, mode="run", every=1):
+    lines = [f"return {{ mode = {lua_str(mode)}, warmup = {warmup}, every = {every}, cases = {{"]
     for c in cases:
         ins = ", ".join(f"{{ {k}, {e}, {lua_str(item)}, {n} }}" for k, e, item, n in c.get("inserts", []))
         lines.append(f"  {{ name = {lua_str(c['name'])}, ticks = {c['ticks']}, inserts = {{ {ins} }}, "
@@ -182,6 +182,9 @@ def main():
     ap.add_argument("paths", nargs="*")
     ap.add_argument("-o", "--out", default=str(HERE / "out" / "dump.json"))
     ap.add_argument("--warmup", type=int, default=30, help="ticks between build and t=0 (power up)")
+    ap.add_argument("--every", type=int, default=1,
+                    help="record every n-th tick only (the others stay empty rows, which fsim conform skips): "
+                         "big, long runs otherwise run out of memory")
     ap.add_argument("--discover", action="store_true", help="export a blueprint with every option set")
     ap.add_argument("--signals", action="store_true", help="write the game's signal order to conformance/")
     ap.add_argument("--dlc", action="store_true",
@@ -218,7 +221,7 @@ def run(args, binary, ap):
         cases = load_cases(args.paths)
         if not cases:
             raise SystemExit("no cases")
-        write_cases(cases, args.warmup)
+        write_cases(cases, args.warmup, every=args.every)
         ticks = 1 + args.warmup + max(c["ticks"] for c in cases) + 3
 
     DATA.mkdir(parents=True, exist_ok=True)
