@@ -142,6 +142,7 @@ def aim_stage(g, col, D, lane, things, port):
         for s, what in ((col["alpha"][i], "a"), (col["lat"][i], "l")):
             copies.append(g.op("arith", sem.arith_spec(EACH, "+", 0, EACH, RED), red=[s.node], label=f"aim {what}{i}"))
     G = g.op("arith", sem.arith_spec(EACH, "+", 0, EACH, RED), red=copies, label="aim things")
+    col["aim G"] = G   # every monster's alpha and L (face.bearing_stage reads them too)
     c = sem.cond
     A = []
     for i in ms:

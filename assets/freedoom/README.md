@@ -12,8 +12,9 @@ Its `flats` holds six 64×64 floor/ceiling flats (rows of palette indexes): FLOO
 FLOOR5_1, FLOOR7_1, TLITE6_4 and FLAT5_4.
 
 `hud.json` holds the status bar lumps in the same format: STBAR, STARMS, STTPRCNT, the big
-digits STTNUM0–9, the small digits STYSNUM0–9 and STGNUM0–9, and the faces STFST01, STFST11,
-STFST21, STFST31, STFST41 and STFDEAD0.
+digits STTNUM0–9, the small digits STYSNUM0–9 and STGNUM0–9, and every face: STFST00–42 (pain
+level, then straight 0–2), STFTR00–40 and STFTL00–40 (turned), STFOUCH0–4, STFEVL0–4, STFKILL0–4,
+STFGOD0 and STFDEAD0.
 
 `weapons.json` holds the player weapon sprites (Doom's psprites) in the same format: PUNGA0–D0,
 PISGA0–C0 and PISFA0, SHTGA0–D0 and SHTFA0–B0, CHGGA0–B0 and CHGFA0–B0, MISGA0–B0 and MISFA0–D0,

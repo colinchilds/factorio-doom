@@ -532,6 +532,47 @@ Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► sp
       checks (`--dlc --warmup 60 --every 2`). 320×200: 78,260 entities, 1.13 ms per tick in Space
       Age, fully powered.
 
+17. **Face expressions (`demos/face.py`, 2026-11-03, user request):** Doom's ST_updateFaceWidget.
+    The status bar face glances left and right at random, turns toward a monster that hurts you (or
+    grits its teeth if it's in front), and grits its teeth after 2 s of firing. The module
+    docstring has the rules; `face.step` is the same in plain Python.
+    - **Priorities (Doom's):** dead (hud.py, by health), hurt (damagecount > 0: turn toward the
+      attacker, left or right outside 45 degrees, else the rampage face; shown 1 s after the
+      damage ends), rampage (Doom's lastattackdown: fire held 70 tics, i.e. A in 1 .. LOWER - 1),
+      idle (a random straight face, half a second each). Tics become ticks (`weapons.ticks`).
+    - **Left out:** the evil grin (weapon pickups, none yet), god mode, and the ouch face: Doom
+      tests `health - oldhealth > 20`, true only when you *gain* 20 health while hurt (the famous
+      bug); the intended "lost more than 20 at once" can't happen with our hits (9 and 12).
+    - **State:** FE (bus, `signal-skull`): the expression, 0..2 straight, 3 right, 4 left, 5 hurt
+      head-on, 6 rampage (5 and 6 show the same face; 3..5 have the hurt priority). On M: FC (the
+      face count), RC (lastattackdown), DC (damagecount in 1/12 tics, +12 per health point lost,
+      -7 a tick, at most 100 tics; for the red flash later), ATK (the attacker: a shot writes 16 << k,
+      the next tick ranges make it k + 1). DC's increments mirror monsters.py's health deciders
+      (`Monsters.damage_bits`), ATK's the shot clauses (`Monsters.shot_clauses`).
+    - **Bearing (raycaster):** FB_k (bus, four signals): monster k right of the view (1), left (2)
+      or within 45 degrees (0), from the aim stage's alpha and L (`face.bearing_stage`: L > 0 and
+      alpha <= L, or L < 0 and alpha <= -L from a negated copy), on the bus like the aim. So the
+      direction is from the camera a few ticks back; who hit you is current.
+    - **Status bar:** 31 faces (5 pain levels × 6 pictures, plus dead), each a (health range, FE)
+      condition on the same per-chunk delta deciders as before (`hud.face_ranges`).
+    - **Game harness lessons:** the idle count first ran from power-on, so its phase depended on
+      the warm-up (a tick longer in the game: 6,942 checks differed); it now starts once RND runs
+      (RND != 0, from its constant). And "face count" counted down while FC > 0, so at 1 its
+      output summed to 0 (the 0-signal rule below: 30 checks); now while > 1.
+    - **Cost:** 8,908 / 10,154 / 12,451 combinators at 64×40 / 160×100 / 320×200 (60 / 110 / 185
+      more: the logic, and 25 more face pictures in the bar). No latency.
+    - **Checks:** game `--verify` checks `face.step` against the bus and M every tick, the face's
+      deciders against `face.step` on a grid of 54,432 states (the script never gets hit from the
+      left), the bearings against floats, and samples frames showing each expression. The script now
+      ends with fire held 2.7 s after the restart (rampage), `--ticks` 2480. raycast `--verify`
+      cycles the expression and checks the bar against `Hud.image` on every checked frame (26 of
+      the 31 faces at 64×40 over 460 ticks, 0 pixels differ).
+    - **Results:** game `--verify` 0 differ at 64×40, 160×100 and 320×200 (expressions seen: all
+      but turned left, which the grid covers); raycast `--verify` 0 differ at 64×40 and 320×200 (bar
+      0 pixels on 109 frames, 26 faces). The 64×40 game matches a Space Age game on 14,225,583
+      checks (2,480 ticks, `--dlc --warmup 60 --every 2`). 320×200: 78,442 entities, 1.17 ms per
+      tick in Space Age, fully powered; blueprint string 8.2 MB.
+
 Still to come (M4): doors; see "Next steps".
 
 Earlier notes that still hold:
@@ -960,7 +1001,8 @@ Done:
   driven by the pad in the game build.
 - M4 step 1, things (architecture item 7): static Freedoom monsters and items on the map,
   occluded by walls, in the raycaster and the game at no extra latency.
-- M4 HUD (architecture item 8): the Freedoom status bar with live ammo, health, armor and face.
+- M4 HUD (architecture item 8): the Freedoom status bar with live ammo, health, armor and face
+  (expressions: item 17).
 - M4 weapons (architecture item 9): seven weapons in front of the view, switching, Doom's firing
   animations and ammo use.
 - M4 thing contact (architecture item 10): pickups, monster pain, solid monsters; the turn ramp.
@@ -969,6 +1011,7 @@ Done:
 - View geometry (architecture item 14): Doom's pixel aspect and eye height, so monsters stand tall.
 - Monsters (architecture item 15): wake, chase around walls, attack on Doom's timing, flinch.
 - Muzzle light (architecture item 16): the view brightens while a weapon flashes.
+- Face expressions (architecture item 17): glances, turning toward an attacker, rampage.
 - Chunks, layout and latency (architecture item 12): six rows per network on signal qualities
   (Space Age), about half the combinators, layout by concept, the bus on a substation row, 17-tick
   raycaster.
@@ -985,18 +1028,17 @@ Commit only when the user asks.
      rotations (they always face the camera), more monster types.
    - Shooting follow-ups: Doom's randomness (damage rolls, pain chance), shotgun spread, rocket
      splash, bullet puffs, more than 8 things. M5 (stretch): angled walls, varying heights.
-   - HUD follow-ups: the face looking left/right and its pain/ouch frames, keys, owned weapons
-     in the ARMS panel once there are pickups; all are more slots of the same kind.
+   - HUD follow-ups: keys, owned weapons in the ARMS panel once there are pickups (more slots of
+     the same kind); the face's evil grin on a weapon pickup.
    - Weapon follow-ups:
      pickups (weapons owned, ammo); the walking bob (it moves sideways too: about 10× the
      pictures, or a different way to draw the gun); the chainsaw and super shotgun.
-   - Contact follow-ups: Doom's blue armor class (absorbs a half; one class now), the face's ouch
-     frame on a hit. Death follow-ups (item 13): the view dropping to the floor (Doom lowers the
+   - Contact follow-ups: Doom's blue armor class (absorbs a half; one class now). Death follow-ups (item 13): the view dropping to the floor (Doom lowers the
      eye), the music restarting on a restart (M6).
    - Screen flashes (Doom's ST_doPaletteStuff, asked about 2026-11-03): a hit adds the damage to
      `damagecount` (at most 100, minus 1 a tic) and the screen takes red palette (count + 7) >> 3
      (1..8); a pickup adds 6 to `bonuscount` (gold palettes 1..4). The whole screen tints,
-     status bar included: color × (1 - f) + tint × f. Walls, flats and things could scale through
+     status bar included: color × (1 - f) + tint × f. damagecount is on M already (DC, item 17). Walls, flats and things could scale through
      the brightness (as the muzzle light) plus a red broadcast per chunk; the weapon's and the
      bar's colors are exact constants, so they need another way.
    - Thing follow-ups: more than 8 things (a fourth tree level costs a tick, or sort by depth on

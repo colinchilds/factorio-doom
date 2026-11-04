@@ -399,8 +399,9 @@ def flat_color(c4, br):
 
 
 def scripted_hud(g, extra):
-    """Status bar values for the scripted demo, from the clock: health sweeps 0..200 (every face),
-    armor 0..200 at half the rate, the current ammo 0..600 in steps of 3, the ammo list likewise."""
+    """Status bar values for the scripted demo, from the clock: health sweeps 0..200 (every pain
+    level), the face's expression cycles 0..6 every 8 ticks, armor 0..200 at half the rate, the
+    current ammo 0..600 in steps of 3, the ammo list likewise."""
     T = extra["T"]
     vals = {"health": g.ss(g.ss(T, ">>", 1), "%", 201, "health"),
             "armor": g.ss(g.ss(T, ">>", 2), "%", 201, "armor"),
@@ -408,7 +409,8 @@ def scripted_hud(g, extra):
             "bullets": g.ss(g.ss(T, "*", 5), "%", 401, "bullets"),
             "shells": g.ss(T, "%", 101, "shells"),
             "rockets": g.ss(g.ss(T, ">>", 1), "%", 101, "rockets"),
-            "cells": g.ss(g.ss(T, "*", 7), "%", 601, "cells")}
+            "cells": g.ss(g.ss(T, "*", 7), "%", 601, "cells"),
+            "face": g.ss(g.ss(T, ">>", 3), "%", 7, "face")}
     t = max(v.node.time for v in vals.values())
     hs = g.op("arith", sem.arith_spec(EACH, "+", 0, EACH, RED), red=[g.delay(v.node, t - v.node.time) for v in vals.values()],
               label="hud state")
@@ -1264,25 +1266,33 @@ def verify(path, g, cols, rows, scal, layout, w, h, ticks, lattice, every=5):
     checked = [t for t in sorted(frames) if t - lag >= 1][2::every]
     t0 = time.time()
     bad = []
+    bar_bad, faces = 0, set()
+    hv = layout["hv"]
     for t in checked:
-        n = diff(frames[t], evaluate(g, cols, rows, t - lag, layout))
+        ev = evaluate(g, cols, rows, t - lag, layout)
+        n = diff(frames[t], ev)
         if n:
             bad.append((t, n))
+        if layout["hud"]:
+            # The bar against the one composed from the values (hud.Hud.image), every checked frame.
+            st = hud_state(g, scal, t - lag)
+            faces.add(hd.face_of(st["health"], st.get("face", 0)))
+            ref_bar = layout["hud"].image(st)
+            bar_bad += sum(1 for y in range(hv, h) for x in range(w) if ev[y][x] != ref_bar[y - hv][x])
     print(f"latency {lag} ticks; {len(checked)} frames x {w * h - len(holes)} lamps checked against the "
           f"netlist evaluation ({(time.time() - t0) / max(1, len(checked)):.1f} s each); {len(bad)} differ")
     for t, n in bad[:10]:
         print(f"  tick {t}: {n} lamps differ")
-    worst = bar_bad = 0
-    hv = layout["hv"]
+    worst = 0
     for t in checked[::max(1, len(checked) // 5)]:
         ev, ref = evaluate(g, cols, rows, t - lag, layout), ideal(g, scal, layout, w, h, t - lag)
         worst = max(worst, sum(1 for y in range(hv) for x in range(w) if ev[y][x] != ref[y][x]))
-        bar_bad += sum(1 for y in range(hv, h) for x in range(w) if ev[y][x] != ref[y][x])
     print(f"fixed point vs float raycaster: at most {worst} of {w * hv} view pixels differ "
           f"({100 * worst / (w * hv):.2f}%) on sampled frames")
     if layout["hud"]:
-        print(f"status bar vs the composed bar: {bar_bad} pixels differ on those frames")
-    return not bad
+        print(f"status bar vs the composed bar: {bar_bad} pixels differ on {len(checked)} frames "
+              f"({len(faces)} faces shown)")
+    return not bad and not bar_bad
 
 
 def main():

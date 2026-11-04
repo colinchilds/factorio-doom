@@ -3,7 +3,7 @@
 The bar is Doom's layout (320 x 32 at 320 x 200) scaled to the screen: bar_height(H) rows of the
 lamp screen (16 at 160 x 100, 32 at 320 x 200); the 3D view is cropped above it, keeping the
 full-screen projection (raycast.build_graph(..., hud=...)). Art from Freedoom (BSD):
-STBAR, the big red digits STTNUM, STTPRCNT, STARMS with the weapon numbers, the face STFST and
+STBAR, the big red digits STTNUM, STTPRCNT, STARMS with the weapon numbers, the faces STF* and
 the small ammo digits STYSNUM (assets/freedoom/hud.json).
 
 Everything that never changes (the bar, labels, percent signs, the ARMS panel with every weapon
@@ -20,7 +20,8 @@ Conditions (scalars N = the value, one signal per number; three networks, all on
     tens g > 0   10 g <= N % 100 < 10 g + 10        on N % 100
     tens 0       N % 100 < 10 and N >= 100          (N % 100 on red, N on green)
     ones g       N % 10 = g                         on N % 10
-    face         a health range per face (5 pain levels from Doom's formula, dead at <= 0)
+    face         a health range (5 pain levels from Doom's formula, dead at <= 0) and the
+                 expression FE (face.py: straight 0..2, turned right, turned left, rampage)
 so leading zeros stay blank and negative values show nothing. The deciders read HS delayed to
 land on the view rows' tick, so the HUD and the view always show the same frame.
 
@@ -37,6 +38,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(HERE))
 from compiler import semantics as sem  # noqa: E402
 from compiler.netlist import GREEN, RED, Collect  # noqa: E402
+import face as fc  # noqa: E402
 
 ASSETS = ROOT / "assets" / "freedoom" / "hud.json"
 BAR_W, BAR_H = 320, 32   # Doom's status bar, at 320 x 200
@@ -75,18 +77,19 @@ def digits(value, x_right, y, font, width):
 
 
 def face_ranges(maximum):
-    """[(lump, lo, hi)]: health lo..hi (None: unbounded) shows that face. Doom's pain level is
-    (100 - min(health, 100)) * 5 // 101; dead at health <= 0."""
-    out = [("STFDEAD0", None, 0)]
+    """[(lump, lo, hi, fe_lo, fe_hi)]: health lo..hi (None: unbounded) and expression fe_lo..fe_hi
+    (None: any) show that face. Doom's pain level is (100 - min(health, 100)) * 5 // 101; dead at
+    health <= 0, whatever the expression."""
+    out = [("STFDEAD0", None, 0, None, None)]
     for k in range(5):
         hs = [v for v in range(1, maximum + 1) if (100 - min(v, 100)) * 5 // 101 == k]
-        out.append((f"STFST{k}1", hs[0], None if k == 0 else hs[-1]))
+        out += [(name, hs[0], None if k == 0 else hs[-1], lo, hi) for name, lo, hi in fc.lumps(k)]
     return out
 
 
-def face_of(health):
-    for name, lo, hi in face_ranges(MAXIMA["health"]):
-        if (lo is None or health >= lo) and (hi is None or health <= hi):
+def face_of(health, fe=0):
+    for name, lo, hi, flo, fhi in face_ranges(MAXIMA["health"]):
+        if (lo is None or health >= lo) and (hi is None or health <= hi) and (flo is None or flo <= fe <= fhi):
             return name
 
 
@@ -191,7 +194,7 @@ class Hud:
                 slots.append({"key": key, "place": place, "glyphs": glyphs})
         fx, fy = FACE
         slots.append({"key": "health", "place": "face",
-                      "glyphs": {name: [(name, fx, fy)] for name, _, _ in face_ranges(MAXIMA["health"])}})
+                      "glyphs": {r[0]: [(r[0], fx, fy)] for r in face_ranges(MAXIMA["health"])}})
         for s in slots:
             rs = [self.art.rect(name, x, y) for parts in s["glyphs"].values() for name, x, y in parts]
             s["src"] = (min(r[0] for r in rs), min(r[1] for r in rs), max(r[2] for r in rs), max(r[3] for r in rs))
@@ -233,7 +236,7 @@ class Hud:
             v = state[key]
             if 0 <= v <= MAXIMA[key]:
                 drawn += digits(v, xr, y, font, self.art.width(f"{font}0"))
-        drawn.append((face_of(state["health"]), *FACE))
+        drawn.append((face_of(state["health"], state.get("face", 0)), *FACE))
         out = [r[:] for r in self.bg]
         for i, s in enumerate(self.slots):
             mine = [d for d in drawn if any(d == part for parts in s["glyphs"].values() for part in parts)]
@@ -280,9 +283,12 @@ class Hud:
                     green = []
                     p = s["place"]
                     if p == "face":
-                        lo, hi = next((lo, hi) for name, lo, hi in face_ranges(MAXIMA["health"]) if name == gl)
-                        conds = ([sem.cond(S, ">=", lo, RED)] if lo is not None else []) + \
-                                ([sem.cond(S, "<=", hi, RED, "and" if lo is not None else None)] if hi is not None else [])
+                        lo, hi, flo, fhi = next(r[1:] for r in face_ranges(MAXIMA["health"]) if r[0] == gl)
+                        terms = ([(S, ">=", lo)] if lo is not None else []) + ([(S, "<=", hi)] if hi is not None else [])
+                        if flo is not None:
+                            F = sigs["face"]
+                            terms += [(F, "=", flo)] if flo == fhi else [(F, ">=", flo), (F, "<=", fhi)]
+                        conds = [sem.cond(s_, c_, v_, RED, "and" if j else None) for j, (s_, c_, v_) in enumerate(terms)]
                         red = N
                     elif p == 100:
                         conds, red = [sem.cond(S, ">=", 100 * gl, RED), sem.cond(S, "<", 100 * gl + 100, RED, "and")], N

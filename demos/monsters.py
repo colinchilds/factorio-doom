@@ -419,10 +419,7 @@ class Monsters:
             base.append(calm + pa + seen + self.ms_range(k, LOOP + p, LOOP + p))
         cl = [b + extra for b in base for extra in self.bands(k, T["chance"], [])]
         out.append((f"decide {k}", spec(cl, [sem.out(ATT[k], constant=1)]), "net"))
-        # The shot: at the attack's fire tick, in sight (and within a tile for a scratch).
-        at = calm + pa + seen + self.ms_range(k, ATTACK + fire_tick(t), ATTACK + fire_tick(t))
-        cl = self.bands(k, T["hit"], at)
-        out.append((f"shoot {k}", spec(cl, [sem.out(PD, constant=T["damage"])]), "net"))
+        out.append((f"shoot {k}", spec(self.shot_clauses(k), [sem.out(PD, constant=T["damage"])]), "net"))
         # Dying and the corpse (combat.py's states).
         H = cb.hp(self.things[i][2])
         dead = [(cb.DMG[i], ">=", H)]
@@ -431,6 +428,27 @@ class Monsters:
         out.append((f"dying {k}", spec([self.ms_range(k, cb.DEATH, cb.corpse(t) - 1)], copy1()), "bus"))
         out.append((f"corpse {k}", spec([self.ms_range(k, cb.corpse(t), cb.corpse(t))], [sem.out(M, networks=RED)]), "bus"))
         return out
+
+    def shot_clauses(self, k):
+        """Monster k's shot hits the player: at its attack's fire tick, in sight (and within a
+        tile for a scratch), the hit roll by distance band."""
+        t, i = self.type(k), self.idx[k]
+        calm = self.alive(k) + [(cb.DMG[i], "<=", LD[k])]
+        at = calm + self.player_alive() + [(SEE[k], ">=", NS - 1)] + \
+            self.ms_range(k, ATTACK + fire_tick(t), ATTACK + fire_tick(t))
+        return self.bands(k, TYPES[t]["hit"], at)
+
+    def damage_bits(self):
+        """Clauses for the health the queue takes this tick: (bit 0, bit 1) of the decrement
+        (armor saves 1: min(2, health); bare: min(3, health))."""
+        h0, a0 = self.start["health"], self.start["armor"]
+        H, A = self.sigs["health"], self.sigs["armor"]
+        arm, bare = [(A, ">=", 1 - a0)], [(A, "<", 1 - a0)]
+        due = self.player_alive() + [(PD, ">", 0), (PH, ">", 0)]
+        hv = lambda comp, v: (H, comp, v - h0)  # noqa: E731
+        bit0 = [due + arm + [hv("=", 1)], due + bare + [hv(">=", 3)], due + bare + [hv("=", 1)]]
+        bit1 = [due + arm + [hv(">=", 2)], due + bare + [hv(">=", 2)]]
+        return bit0, bit1
 
     def _damage(self):
         """The queue PD: drains TILE_DMG a tick while the player lives (held while dead), and the
@@ -446,12 +464,9 @@ class Monsters:
                                                                                sem.out(PD, constant=-TILE_DMG)]), "net"),
                ("damage held", spec([[(H, "<=", -h0), (PD, ">", 0)], pa + [(PD, ">", 0), (PH, "=", 0)]],
                                     [sem.out(PD, networks=GREEN)]), "net")]
-        arm, bare = [(A, ">=", 1 - a0)], [(A, "<", 1 - a0)]
+        arm = [(A, ">=", 1 - a0)]
         due = pa + [(PD, ">", 0), (PH, ">", 0)]
-        hv = lambda comp, v: (H, comp, v - h0)  # noqa: E731
-        # health decrement: armor (save 1): min(2, health); bare: min(3, health)
-        bit0 = [due + arm + [hv("=", 1)], due + bare + [hv(">=", 3)], due + bare + [hv("=", 1)]]
-        bit1 = [due + arm + [hv(">=", 2)], due + bare + [hv(">=", 2)]]
+        bit0, bit1 = self.damage_bits()
         out.append(("damage health 1", spec(bit0, [sem.out(H, constant=-1)]), "reg"))
         out.append(("damage health 2", spec(bit1, [sem.out(H, constant=-2)]), "reg"))
         out.append(("damage armor", spec([due + arm], [sem.out(A, constant=-1)]), "reg"))
@@ -520,7 +535,7 @@ def step(mon, bus, see):
            "XQ": [sem.i32(v * v) for v in bus["DX"]], "YQ": [sem.i32(v * v) for v in bus["DY"]],
            "R": [sem.i32(m * bus["RND"]) for m in MULT[:n]], "LD": [bus["DMG"][i] for i in mon.idx],
            "RND": sem.i32((bus["RND"] + LCG_C) * LCG_A), "CF": [], "DT": [0] * n, "PH": int(bus["PH"] == 0 and bus["PD"] > 0),
-           "inc": {}, "hits": 0}
+           "inc": {}, "hits": 0, "shots": [0] * n}
     for k in range(n):
         ex, ey = mon.E[k]
         cf = []
@@ -632,6 +647,7 @@ def step(mon, bus, see):
         if calm and pa and seen and ms == ATTACK + fire_tick(t) and roll(T["hit"]):
             out["PD"] += T["damage"]
             out["hits"] += 1
+            out["shots"][k] = 1
     # the damage queue: drains every other tick (PH)
     pd, ph = bus["PD"], bus["PH"] > 0
     if pa and pd > TILE_DMG and ph:

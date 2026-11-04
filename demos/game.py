@@ -32,7 +32,9 @@ held by deciders that read the bus and write back onto it, one tick per step:
 
 Monsters (monsters.py, 2026-11-03) keep their positions on the bus and their working signals
 (offsets, sight lines, random numbers, flags, the damage queue) on a network of their own, M,
-around a pole below the turn deciders: their deciders read the bus on red and M on green.
+around a pole below the turn deciders: their deciders read the bus on red and M on green. The
+status bar face's expression (face.py) is on the bus too, its counters on M, and the raycaster puts
+each monster's bearing (left, right or ahead) on the bus next to the aim.
 
 The raycaster (demos/raycast.py build_graph) takes its camera from the bus through a relay line
 over the top of the screen to a pole left of it (its ext input). The status bar (demos/hud.py)
@@ -58,6 +60,7 @@ from compiler import netlist  # noqa: E402
 from compiler import semantics as sem  # noqa: E402
 from compiler.netlist import EACH, GREEN, RED, Collect, Graph, Node, Scalar  # noqa: E402
 import combat as cb  # noqa: E402
+import face as fc  # noqa: E402
 import hud as hd  # noqa: E402
 import input_pad  # noqa: E402
 import monsters as mo  # noqa: E402
@@ -76,7 +79,7 @@ FIRE, NEXT, USE = sig(input_pad.FIRE), sig("signal-N"), sig("signal-U")   # rela
 TURNC = sig("signal-L")    # ticks a turn button has been held (the turn counter, turn_counter)
 RESTART = sig("signal-Z")  # one tick: Use pressed while dead (on the bus and REG's green input)
 DEAD = sig("signal-O")     # the player is dead (on the turn counter's network: no turning)
-BUS = STATE + [WEAPON, ANIM, QUEUE, FIRE, NEXT, USE, TURNC, RESTART, DEAD] + tc.GONE + cb.SIGNALS + mo.SIGNALS
+BUS = STATE + [WEAPON, ANIM, QUEUE, FIRE, NEXT, USE, TURNC, RESTART, DEAD] + tc.GONE + cb.SIGNALS + mo.SIGNALS + fc.BUS
 TOUCH_SIGS = {"SX": SX, "SY": SY, "health": HEALTH, "armor": ARMOR, **AMMO}
 SPAWN = (int(8.5 * FP), int(12.5 * FP))
 assert SPAWN[0] % 2 == 0 and SPAWN[1] % 2 == 0, "camera_from folds SPAWN in after the | 1"
@@ -161,7 +164,7 @@ def player_graph(reg, reg_pos, held, held_pos, gate_pos, turn_pos, box, turn_rat
     Monsters (touch.py) are solid: their boxes (half-size `box`, so the player's box can't straddle
     one between its corners) join the walls in the corner tests. Thing contact (pickups, pain)
     writes the bus and REG like the weapon logic."""
-    g = Graph(reserved=BUS + mo.NET + [sig(s) for s in input_pad.BUTTON_SIGNALS])
+    g = Graph(reserved=BUS + mo.NET + fc.NET + [sig(s) for s in input_pad.BUTTON_SIGNALS])
     S = g.ext(reg, reg_pos, label="REG")
     # The monsters' network (monsters.py): a pole the caller placed; its writers and readers wire to it.
     M = g.ext(mnet, mnet_pos, size=(1, 1), connectors=(1, 2), label="M") if mnet is not None else None
@@ -181,7 +184,7 @@ def player_graph(reg, reg_pos, held, held_pos, gate_pos, turn_pos, box, turn_rat
         if things:
             mon = mo.Monsters(things, walls(), SPAWN, TOUCH_SIGS, hd.START)
             specs += (tc.Logic(things, TOUCH_SIGS, hd.START, SPAWN).specs() + cb.logic(things, WEAPON, ANIM, AMMO, start)
-                      + mon.specs())
+                      + mon.specs() + (fc.specs(mon, ANIM) if mon.idx else []))
         # Every state the bus (or M) holds drops to 0 on a restart (gated); the REG writers need no
         # gate: REG drops its input that tick, and none of them fires for a dead player afterwards.
         # The arithmetic M writers (monsters.py: offsets, random numbers) hold nothing. Deciders
@@ -383,8 +386,10 @@ def camera_from(port, port_pos, things=(), turn=DEFAULT_TURN, light=False):
 
     def aim(g, col, D, lane):
         nodes = cb.aim_stage(g, col, D, lane, things, g_port[0])
-        g_port[0].red += nodes   # wired to the port: onto the bus
+        bearing = fc.bearing_stage(g, col, things)
+        g_port[0].red += nodes + bearing   # wired to the port: onto the bus
         camera.aim[:] = nodes
+        camera.face[:] = bearing
 
     def camera(g):
         S = g.ext(port, port_pos, size=(1, 1), connectors=(1, 2), label="state port")
@@ -402,7 +407,7 @@ def camera_from(port, port_pos, things=(), turn=DEFAULT_TURN, light=False):
         if light:
             extra["light"] = lambda g, ex: (weapon_key(g, ex), wp.light_table())
         return A, PX, PY, extra
-    camera.aim = []
+    camera.aim, camera.face = [], []
     return camera
 
 
@@ -424,7 +429,7 @@ def hud_from_port(g, extra):
                              label=f"current ammo {k or 'none'}"))
     cur = g.op("arith", sem.arith_spec(EACH, "+", 0, CUR, RED), red=sel, label="current ammo")
     out = g.op("arith", sem.arith_spec(EACH, "+", 0, EACH, RED), red=[hs, cur], label="hud values")
-    return out, {**keys, "ammo": CUR}
+    return out, {**keys, "ammo": CUR, "face": fc.FE}
 
 
 def weapon_key(g, extra):
@@ -541,6 +546,7 @@ def build(w, h, n=None, hold=input_pad.DEFAULT_HOLD, substation_quality=DEFAULT_
     ent_r = gr.compile(b, blocked=lattice, region=lambda x, y: x <= -2, x_right=layout["x_right"])
     raycast.wire_screen(b, ent_r, cols, layout, w, h, rows)
     nodes["aim"], nodes["aim_graph"], nodes["port"] = cam.aim, gr, getattr(cam, "port", None)
+    nodes["face"] = cam.face
     # REG to the row's last substation (right of the screen), through relay poles if needed.
     reg_fp, sub_fp = (reg_pos[0], reg_pos[1], reg_pos[0] + 2, reg_pos[1] + 1), (xs[-1], y_s, xs[-1] + 2, y_s + 2)
     netlist._relay(b, reg_fp, (reg, RED_OUT), sub_fp, (subs[-1], 1), 1, lambda x, y: not lattice(x, y), b.occupied(),
@@ -563,13 +569,13 @@ def build(w, h, n=None, hold=input_pad.DEFAULT_HOLD, substation_quality=DEFAULT_
 # the fist while imp 0 walks around the red block (a detour) and throws fireballs; walk up, turn to
 # it and punch four times (a flinch each time, and it doesn't attack meanwhile); stop, and it
 # scratches us to death. Dead: fire, switch, turn and walk (all ignored), then Use: a new game
-# (monsters back where they started, asleep), walk and fire.
+# (monsters back where they started, asleep), walk, and hold fire for 2.7 s (the face's rampage).
 FIGHT_SCRIPT = [("ring 1,0", 680, 704), ("fire", 725, 727),
                 ("weapon", 800, 801), ("ring -1,0", 800, 836), ("ring -1,0", 848, 848), ("fire", 875, 877),
                 ("weapon", 1000, 1001), ("weapon", 1018, 1019), ("weapon", 1036, 1037), ("weapon", 1054, 1055),
                 ("ring 1,0", 1100, 1134), ("ring 0,-1", 1160, 1210), ("ring 1,0", 1225, 1245), ("fire", 1300, 1445),
                 ("fire", 2140, 2150), ("weapon", 2160, 2161), ("ring 1,0", 2170, 2185), ("ring 0,-1", 2190, 2200),
-                ("use", 2215, 2215), ("ring 0,-1", 2240, 2265), ("fire", 2275, 2280)]
+                ("use", 2215, 2215), ("ring 0,-1", 2240, 2265), ("fire", 2275, 2440)]
 
 
 def schedule(pad, ticks, seed=2, keys=False):
@@ -663,6 +669,27 @@ def reference_states(pad, g, nodes, inserts, ticks, hold, lat):
                 sem.add_into(acc, o)
             aim_cache[k] = acc
         return aim_cache[k]
+    # The face's bearings (face.bearing_stage), also raycaster nodes on the bus, from the port at
+    # t - tau_f.
+    face = nodes.get("face") or []
+    tau_f = face[0].time if face else 0
+    if any(n.time != tau_f for n in face):
+        raise ValueError("face bearing nodes at different times")
+    face_cache = {}
+
+    def face_out(t):
+        # Before the pipeline holds the port's first value (t < tau_f - 1) its stages hold zeros:
+        # no bearing.
+        if t < tau_f - 1:
+            return {}
+        net = bus[t - tau_f] if t - tau_f >= 0 else {}
+        k = tuple(net.get(a, 0) for a in akeys)
+        if k not in face_cache:
+            acc = {}
+            for o in nodes["aim_graph"].evaluate(0, face, {nodes["port"]: {a: v for a, v in zip(akeys, k) if v}}):
+                sem.add_into(acc, o)
+            face_cache[k] = acc
+        return face_cache[k]
     dkeys = [sem.key(s) for s in cb.DMG]
     mkeys = [sem.key(s) for s in mo.DX + mo.DY]
     # Line of sight (monsters.py): two ticks deep, from the bus then.
@@ -722,6 +749,8 @@ def reference_states(pad, g, nodes, inserts, ticks, hold, lat):
             sem.add_into(wm[t], o)
         if aim:
             sem.add_into(wm[t], aim_out(t))
+        if face:
+            sem.add_into(wm[t], face_out(t))
         for o in g.evaluate(0, nodes["spend"], ins):
             sem.add_into(spend[t], o)
         for o in g.evaluate(0, nodes.get("net") or [], ins):
@@ -793,6 +822,9 @@ def verify(path, b, pad, g, nodes, gr, cols, rows, layout, w, h, inserts, ticks,
     BK = [[sem.key(s) for s in q] for q in mo.CF[:nm]]
     PDK, RNDK, PHK = sem.key(mo.PD), sem.key(mo.RND), sem.key(mo.PH)
     picked, hits, shot, aimed, woke, attacks = set(), 0, {}, set(), set(), 0
+    FEK, FBK = sem.key(fc.FE), [sem.key(s) for s in fc.FB[:nm]]
+    FNK = {name: sem.key(s) for name, s in (("FC", fc.FC), ("RC", fc.RC), ("DC", fc.DC), ("ATK", fc.ATK), ("RND", mo.RND))}
+    faces, face_bad = {}, []
     ZK, restarts, dead_ticks = sem.key(RESTART), [], 0
     for t in range(1, ticks):
         prev, cur = ref_bus[t - 1], ref_bus[t]
@@ -816,8 +848,21 @@ def verify(path, b, pad, g, nodes, gr, cols, rows, layout, w, h, inserts, ticks,
                       RND=prevm.get(RNDK, 0), PH=prevm.get(PHK, 0))
             mout = mo.step(mon, mb, mb["SEE"])
             mout_hits = mout.pop("hits")
-            for k_, v in mout.pop("inc").items():
+            mshots = mout.pop("shots")
+            minc = mout.pop("inc")
+            for k_, v in minc.items():
                 inc[k_] = inc.get(k_, 0) + v
+            # The face (face.step): from the bus and M at t - 1, the expression on the bus at t and
+            # its counters on M.
+            if nm:
+                fwant = fc.step(mon, {"FE": prev.get(FEK, 0), "FB": [prev.get(k_, 0) for k_ in FBK], "anim": prev.get(A, 0)},
+                                {name: prevm.get(k_, 0) for name, k_ in FNK.items()}, mshots, -minc.get("health", 0))
+                if prev.get(ZK):
+                    fwant = {k_: 0 for k_ in fwant}
+                fhave = {"FE": cur.get(FEK, 0), **{name: curm.get(k_, 0) for name, k_ in FNK.items() if name != "RND"}}
+                if fhave != fwant:
+                    face_bad.append((t, fhave, fwant))
+                faces[fhave["FE"]] = faces.get(fhave["FE"], 0) + 1
             ms = mout.pop("MS")
             # The sight lines read the bus two ticks back (two ticks deep).
             src = ref_bus[t - 2] if t >= 2 else {}
@@ -914,15 +959,65 @@ def verify(path, b, pad, g, nodes, gr, cols, rows, layout, w, h, inserts, ticks,
             xy = {i: ((int(things[i][0] * FP) + src.get(sem.key(mo.MX[k]), 0)) / FP,
                       (int(things[i][1] * FP) + src.get(sem.key(mo.MY[k]), 0)) / FP)
                   for k, i in enumerate(tc.monsters(things or []))}
-            fa, fc, margin = cb.ideal_aim(things, x, y, ang, [src.get(k, 0) for k in DK], raycast.is_wall, MAP,
+            fa, fcl, margin = cb.ideal_aim(things, x, y, ang, [src.get(k, 0) for k in DK], raycast.is_wall, MAP,
                                             w, layout["view"].plane, xy)
-            if (ref_bus[t].get(sem.key(cb.AIM), 0), ref_bus[t].get(sem.key(cb.CLOSE), 0)) != (fa, fc):
+            if (ref_bus[t].get(sem.key(cb.AIM), 0), ref_bus[t].get(sem.key(cb.CLOSE), 0)) != (fa, fcl):
                 if margin < NEAR_TIE:
                     aim_near += 1
                 else:
                     aim_bad.append(t)
         print(f"aim vs float hitscan: {len(aim_bad)} ticks differ {aim_bad[:5]}, {aim_near} near-ties")
     rule_bad += aim_bad
+    if nm:
+        # The bearings against floats from the bus tau_f ticks earlier (near-ties skipped).
+        tau_f = nodes["face"][0].time
+        fb_bad, fb_near = [], 0
+        for t in range(tau_f, ticks):
+            src = ref_bus[t - tau_f]
+            x = ((src.get(sem.key(SX), 0) + SPAWN[0]) | 1) / FP
+            y = ((src.get(sem.key(SY), 0) + SPAWN[1]) | 1) / FP
+            ang = 2 * math.pi * (((src.get(sem.key(SR), 0) >> ANGLE_SUB) + A0) % 256) / 256
+            xy = {i: ((int(things[i][0] * FP) + src.get(sem.key(mo.MX[k]), 0)) / FP,
+                      (int(things[i][1] * FP) + src.get(sem.key(mo.MY[k]), 0)) / FP)
+                  for k, i in enumerate(tc.monsters(things))}
+            codes, margin = fc.ideal_bearing(things, x, y, ang, xy)
+            if [ref_bus[t].get(k, 0) for k in FBK] != codes:
+                if margin < NEAR_TIE:
+                    fb_near += 1
+                else:
+                    fb_bad.append(t)
+        names = ["straight 0", "straight 1", "straight 2", "turned right", "turned left", "hurt head-on", "rampage"]
+        print(f"face (face.step): {len(face_bad)} ticks differ {face_bad[:3]}; ticks per expression "
+              f"{ {names[e]: n for e, n in sorted(faces.items())} }; bearings vs floats: {len(fb_bad)} differ "
+              f"{fb_bad[:5]}, {fb_near} near-ties")
+        # And the face's deciders against face.step on every combination of a grid of states (the
+        # script can't reach them all: an attack from the left, say), no shots or damage.
+        fnodes = [n for n in nodes["bus"] + nodes["net"]
+                  if n.label.startswith(("face ", "rampage ", "damage count", "attacker "))]
+        rnds = [fc.LOOK[1][0] - 1, 0, fc.LOOK[2][0]]
+        grid_bad, combos = [], 0
+        for fe_ in range(7):
+            for fcv in (0, 1, 7):
+                for rc in (0, 1, 2, fc.RAMPAGE):
+                    for dc in (0, fc.DECAY, fc.UNIT, fc.CAP + 30):
+                        for atk in (0, 1, 2, nm, fc.RAW, (fc.RAW << (nm - 1)) + fc.RAW + 3):
+                            for code in (0, 1, 2):
+                                for an in (0, 5, wp.LOWER + 2):
+                                    for rnd in rnds:
+                                        net = {"FC": fcv, "RC": rc, "DC": dc, "ATK": atk, "RND": rnd}
+                                        bus_in = {k: v for k, v in [(FEK, fe_), (A, an)] + [(k, code) for k in FBK] if v}
+                                        m_in = {FNK[k]: v for k, v in net.items() if v}
+                                        got = {}
+                                        for o in g.evaluate(0, fnodes, {nodes["S"]: bus_in, nodes["M"]: m_in}):
+                                            sem.add_into(got, o)
+                                        have = {"FE": got.get(FEK, 0),
+                                                **{k: got.get(FNK[k], 0) for k in ("FC", "RC", "DC", "ATK")}}
+                                        want = fc.step(mon, {"FE": fe_, "FB": [code] * nm, "anim": an}, net, [0] * nm, 0)
+                                        combos += 1
+                                        if have != want:
+                                            grid_bad.append((fe_, net, code, an, have, want))
+        print(f"face deciders vs face.step on {combos} states: {len(grid_bad)} differ {grid_bad[:2]}")
+        rule_bad += face_bad + fb_bad + grid_bad
     if M:
         print(f"monster network M: {len(bad_m)} ticks differ")
         for t in bad_m[:3]:
@@ -970,6 +1065,11 @@ def verify(path, b, pad, g, nodes, gr, cols, rows, layout, w, h, inserts, ticks,
     lit = {k: [t for t in range(lag + 2, ticks) if lv(t - lag) == k] for k in (1, 2)}
     for k, ts in lit.items():
         sample += ts[::max(1, len(ts) // 6)][:6]
+    # Plus two frames showing each face expression.
+    fe_at = lambda t: ref_bus[t].get(sem.key(fc.FE), 0)  # noqa: E731
+    for e in range(7):
+        ts = [t for t in range(lag + 2, ticks) if fe_at(t - lag) == e]
+        sample += ts[::max(1, len(ts) // 2)][:2]
     sample = sorted(set(sample))
     fbad = []
     for t in sample:
@@ -987,7 +1087,7 @@ def main():
     ap.add_argument("--size", default="160x100")
     ap.add_argument("--button-size", type=int)
     ap.add_argument("--hold", type=int, default=input_pad.DEFAULT_HOLD)
-    ap.add_argument("--ticks", type=int, default=2340)
+    ap.add_argument("--ticks", type=int, default=2480)
     ap.add_argument("--verify", action="store_true")
     ap.add_argument("--keys", action="store_true",
                     help="script the input as the keyboard mod (mod/doom-input) instead of pad drops")

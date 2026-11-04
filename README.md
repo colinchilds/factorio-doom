@@ -31,7 +31,8 @@ The tools so far:
   or get shot, then walk at you around walls, and attack on Doom's timing: the zombieman shoots
   (often missing at range), the imp scratches up close and throws fireballs (no projectiles yet:
   half of them hit). Any hit makes a monster flinch, which stops its attack, so punching works. A Freedoom status bar (`demos/hud.py`) shows
-  ammo, health, armor and the face. Seven Freedoom weapons (`demos/weapons.py`): the gun in front
+  ammo, health, armor and the face, which glances around, turns toward whatever hurts you and grits
+  its teeth when you fire for a while (`demos/face.py`). Seven Freedoom weapons (`demos/weapons.py`): the gun in front
   of the view, "next weapon" switches, fire plays Doom's animation and uses ammo. Shots hit the
   nearest live monster in the middle of the view (`demos/combat.py`), which flinches with its
   pain frame and dies with Freedoom's death animation, leaving a corpse. At 0 health you're dead
