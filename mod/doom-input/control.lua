@@ -8,7 +8,8 @@ is toggled on, this mod writes into them, every tick their contents change:
   held     signal-W forward, S back, A turn left, D turn right (from the game's walking state, so
            whatever the movement keys are bound to, diagonals as two buttons), signal-F fire (the
            shooting state: Space by default). 1 while held.
-  pressed  signal-N next weapon (the game's next-weapon control), signal-U use: 1 for one tick.
+  pressed  signal-1 .. signal-7 the weapon slots (Doom's number keys: 1 fist, 2 pistol, ... 7 BFG;
+           keys 1-7 by default), signal-U use, signal-R reset (a new game): 1 for one tick.
 
 A script's write is on the wire the next tick (conformance case constant_script). The game only
 reports key presses, never releases, so held keys come from walking_state / shooting_state, which
@@ -19,7 +20,7 @@ tick to where it was when toggled on.
 
 local HELD_TAG, PRESSED_TAG = "doom-input:held", "doom-input:pressed"
 local FORWARD, BACK, LEFT, RIGHT, FIRE = "signal-W", "signal-S", "signal-A", "signal-D", "signal-F"
-local NEXT, USE = "signal-N", "signal-U"
+local USE, RESET = "signal-U", "signal-R"
 local HELD_ORDER = { FORWARD, BACK, LEFT, RIGHT, FIRE }
 local RESCAN = 600 -- ticks between scans for tagged combinators while on
 
@@ -34,7 +35,14 @@ local LINKED = {
   ["doom-input-move-left"] = LEFT, ["doom-input-move-right"] = RIGHT,
   ["doom-input-shoot-enemy"] = FIRE,
 }
-local PRESSES = { ["doom-input-next-weapon"] = NEXT, ["doom-input-use"] = USE }
+local PRESSES = { ["doom-input-use"] = USE, ["doom-input-reset"] = RESET }
+local PRESS_ORDER = {}
+for k = 1, 7 do
+  PRESSES["doom-input-weapon-" .. k] = "signal-" .. k
+  PRESS_ORDER[k] = "signal-" .. k
+end
+PRESS_ORDER[#PRESS_ORDER + 1] = USE
+PRESS_ORDER[#PRESS_ORDER + 1] = RESET
 
 local function S()
   storage.active = storage.active or {}         -- player index -> {anchor, controller, pending = {sig = tick}}
@@ -109,7 +117,7 @@ local function update(tick)
   end
   local hl, pl = {}, {}
   for _, sig in ipairs(HELD_ORDER) do if held[sig] then hl[#hl + 1] = sig end end
-  for _, sig in ipairs({ NEXT, USE }) do if pressed[sig] then pl[#pl + 1] = sig end end
+  for _, sig in ipairs(PRESS_ORDER) do if pressed[sig] then pl[#pl + 1] = sig end end
   write("held", hl)
   write("pressed", pl)
 end

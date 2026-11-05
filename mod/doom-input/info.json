@@ -1,9 +1,9 @@
 {
   "name": "doom-input",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "title": "factorio-doom keyboard input",
   "author": "factorio-doom",
   "factorio_version": "2.1",
   "dependencies": ["base"],
-  "description": "Optional keyboard input for the factorio-doom blueprint: movement keys, shoot and next weapon drive the blueprint's keyboard combinators. Toggle it from the shortcut bar. The blueprint works without this mod (the chest pad)."
+  "description": "Optional keyboard input for the factorio-doom blueprint: movement keys, shoot, the number keys (weapons), use and reset drive the blueprint's keyboard combinators. Toggle it from the shortcut bar. The blueprint works without this mod (the chest pad)."
 }

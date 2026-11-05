@@ -5,7 +5,8 @@ the D-pad, turn, slide along walls.
 
 Player state is one register, REG: a decider `RESTART = 0 -> Everything` that adds its own output
 (green loop) to the increments on its red input, and drops it all on a restart (Use pressed while
-dead: RESTART on its green input for a tick; every state held on the bus drops too). It holds X and Y (displacement from SPAWN, 1/FP
+dead, or the pad's reset button at any time: RESTART on its green input for a tick; every state
+held on the bus drops too). It holds X and Y (displacement from SPAWN, 1/FP
 tiles) and R (turn, 1024 per revolution, unbounded; the view angle is ((R >> 2) + A0) & 255,
 with the >> 2 folded into the lookup tables keyed on R & 1023).
 
@@ -26,8 +27,9 @@ and the four ammo counts. For now only the weapons change them (ammo); shooting 
 
 The state bus is REG's red output network. Besides REG it carries the weapon state (weapons.py),
 held by deciders that read the bus and write back onto it, one tick per step:
-    relays   FIRE (held) and NEXT (pressed) from the pad onto the bus (Each would bring every button)
-    W, A, D  the weapon, its animation tick and queued switches (weapons.logic)
+    relays   FIRE (held), USE (pressed) and SEL (the weapon a number button selects, its index + 1)
+             from the pad onto the bus (Each would bring every button)
+    W, A, P  the weapon, its animation tick and the pending weapon (weapons.logic)
     spend    per weapon, at its shots' ticks: ammo -cost into REG (as an increment)
 
 Monsters (monsters.py, 2026-11-03) keep their positions on the bus and their working signals
@@ -74,12 +76,12 @@ SX, SY, SR = sig("signal-X"), sig("signal-Y"), sig("signal-R")
 HEALTH, ARMOR = sig("signal-H"), sig("signal-V")   # status bar values (offsets from hud.START)
 AMMO = {"bullets": sig("signal-B"), "shells": sig("signal-J"), "rockets": sig("signal-K"), "cells": sig("signal-C")}
 STATE = [SX, SY, SR, HEALTH, ARMOR] + list(AMMO.values())   # REG
-WEAPON, ANIM, QUEUE = sig("signal-G"), sig("signal-T"), sig("signal-Q")   # weapon state (on the bus)
-FIRE, NEXT, USE = sig(input_pad.FIRE), sig("signal-N"), sig("signal-U")   # relayed buttons (on the bus)
+WEAPON, ANIM, PENDING = sig("signal-G"), sig("signal-T"), sig("signal-Q")   # weapon state (on the bus)
+FIRE, SEL, USE = sig(input_pad.FIRE), sig("signal-N"), sig(input_pad.USE)   # relayed buttons (on the bus)
 TURNC = sig("signal-L")    # ticks a turn button has been held (the turn counter, turn_counter)
-RESTART = sig("signal-Z")  # one tick: Use pressed while dead (on the bus and REG's green input)
+RESTART = sig("signal-Z")  # one tick: Use pressed while dead, or reset (on the bus and REG's green input)
 DEAD = sig("signal-O")     # the player is dead (on the turn counter's network: no turning)
-BUS = STATE + [WEAPON, ANIM, QUEUE, FIRE, NEXT, USE, TURNC, RESTART, DEAD] + tc.GONE + cb.SIGNALS + mo.SIGNALS + fc.BUS
+BUS = STATE + [WEAPON, ANIM, PENDING, FIRE, SEL, USE, TURNC, RESTART, DEAD] + tc.GONE + cb.SIGNALS + mo.SIGNALS + fc.BUS
 TOUCH_SIGS = {"SX": SX, "SY": SY, "health": HEALTH, "armor": ARMOR, **AMMO}
 SPAWN = (int(8.5 * FP), int(12.5 * FP))
 assert SPAWN[0] % 2 == 0 and SPAWN[1] % 2 == 0, "camera_from folds SPAWN in after the | 1"
@@ -147,6 +149,7 @@ def wall_runs():
 
 def player_graph(reg, reg_pos, held, held_pos, gate_pos, turn_pos, box, turn_rate=DEFAULT_TURN,
                  pressed=None, pressed_pos=None, wm_pos=None, things=(), turnc=None, turnc_pos=None, restart_pos=None,
+                 reset_pos=None,
                  mnet=None, mnet_pos=None):
     """The player logic. Returns (graph, nodes) with nodes S (the bus), H, P (ext), gates, turn and
     spend (fixed sinks feeding REG), bus (fixed sinks writing the bus: relays and weapon state),
@@ -169,24 +172,32 @@ def player_graph(reg, reg_pos, held, held_pos, gate_pos, turn_pos, box, turn_rat
     # The monsters' network (monsters.py): a pole the caller placed; its writers and readers wire to it.
     M = g.ext(mnet, mnet_pos, size=(1, 1), connectors=(1, 2), label="M") if mnet is not None else None
     H = g.ext(held, held_pos, size=(1, 2), label="HELD")
-    # Weapons: the relays put fire (held) and next (pressed) on the bus; the weapon state deciders
-    # read the bus and write W and A back onto it (or spend ammo into REG).
+    # Weapons: the relays put fire (held), use (pressed) and the selected weapon on the bus; the
+    # weapon state deciders read the bus and write W, A and P back onto it (or spend ammo into REG).
     bus, spend, net = [], [], []
     P = None
     if pressed:
         P = g.ext(pressed, pressed_pos, size=(1, 2), label="PRESSED")
         relay = lambda src, s, label: Node(g, "arith", sem.arith_spec(s, "+", 0, s, RED), red=[src], time=1, label=label)  # noqa: E731
-        relays = [relay(H, FIRE, "fire held"), relay(P, NEXT, "next pressed"), relay(P, USE, "use pressed")]
+        relays = [relay(H, FIRE, "fire held"), relay(P, USE, "use pressed")]
+        # A number button: SEL = its weapon's index + 1 for a tick (the highest slot wins if two
+        # are pressed at once, so SEL is always one weapon).
+        slots = [(int(name.split()[1]), sig(s)) for name, s, _ in input_pad.SLOTS]
+        for k, s in slots:
+            conds = [sem.cond(s, ">", 0, RED)] + [sem.cond(o, "<=", 0, RED, "and") for j, o in slots if j > k]
+            relays.append(Node(g, "decider", sem.decider_spec(conds, [sem.out(SEL, constant=wp.slot_index(k) + 1)]),
+                               red=[P], time=1, label=f"select {k}"))
         bus += relays
         start = {k: v for k, v in hd.START.items() if k in AMMO}
-        specs = wp.logic(WEAPON, ANIM, QUEUE, FIRE, NEXT, AMMO, start, (HEALTH, hd.START["health"]))
+        specs = wp.logic(WEAPON, ANIM, PENDING, FIRE, SEL, AMMO, start, (HEALTH, hd.START["health"]))
         mon = None
         if things:
             mon = mo.Monsters(things, walls(), SPAWN, TOUCH_SIGS, hd.START)
             specs += (tc.Logic(things, TOUCH_SIGS, hd.START, SPAWN).specs() + cb.logic(things, WEAPON, ANIM, AMMO, start)
                       + mon.specs() + (fc.specs(mon, ANIM) if mon.idx else []))
-        # Every state the bus (or M) holds drops to 0 on a restart (gated); the REG writers need no
-        # gate: REG drops its input that tick, and none of them fires for a dead player afterwards.
+        # Every state the bus (or M) holds drops to 0 on a restart (gated), and the REG writers
+        # (ammo spent, pickups, damage) skip that tick: REG drops its input on the restart tick, but
+        # their outputs from it (from the old state) would land in the new game.
         # The arithmetic M writers (monsters.py: offsets, random numbers) hold nothing. Deciders
         # read the bus on red and M (if any) on green.
         mg = [M] if M else []
@@ -196,7 +207,7 @@ def player_graph(reg, reg_pos, held, held_pos, gate_pos, turn_pos, box, turn_rat
             if target in ("bus", "net"):
                 n = Node(g, "decider", gated(spec), red=[S], green=mg, time=1, label=label)
             elif target == "reg":
-                n = Node(g, "decider", spec, red=[S], green=mg, time=1, label=label)
+                n = Node(g, "decider", gated(spec), red=[S], green=mg, time=1, label=label)
             else:   # netarith
                 n = Node(g, "arith", spec, red=io(item[3].get("red")), green=io(item[3].get("green")), time=1, label=label)
             {"reg": spend, "bus": bus}.get(target, net).append(n)
@@ -224,13 +235,18 @@ def player_graph(reg, reg_pos, held, held_pos, gate_pos, turn_pos, box, turn_rat
             c0 += -(-len(lst) // SPEND_ROWS)
     # Death and restart: Use pressed while dead -> RESTART for a tick, onto the bus (the gated
     # deciders above drop their state) and REG's green input (REG drops its values). Fixed next to
-    # REG (restart_pos); game.build wires its outputs.
-    restart = []
+    # REG (restart_pos); game.build wires its outputs. The reset button does the same at any time:
+    # a decider reading PRESSED (reset_pos, below), its outputs joined to the restart decider's.
+    restart, reset = [], []
     if pressed:
         restart = [Node(g, "decider", sem.decider_spec(dead_terms() + [sem.cond(USE, ">", 0, RED, "and")],
                                                        [sem.out(RESTART, constant=1)]),
                         red=[S], time=1, label="restart")]
         restart[0].fixed, restart[0].pos = True, restart_pos
+        reset = [Node(g, "decider", sem.decider_spec([sem.cond(sig(input_pad.RESET), ">", 0, RED)],
+                                                     [sem.out(RESTART, constant=1)]),
+                      red=[P], time=1, label="reset")]
+        reset[0].fixed, reset[0].pos = True, reset_pos
     # Turning: straight from HELD into REG, slow until the turn counter (TURNC, the caller's
     # register: turn_counter) reaches the ramp, and not while dead (DEAD on the counter's network).
     slow, fast, ramp = turn_rate
@@ -292,7 +308,7 @@ def player_graph(reg, reg_pos, held, held_pos, gate_pos, turn_pos, box, turn_rat
             n.fixed, n.pos = True, (gate_pos[0], gate_pos[1] + len(gates))
             gates.append(n)
     return g, {"S": S, "H": H, "P": P, "TC": TC, "gates": gates, "turn": turn, "spend": spend, "bus": bus, "lat": lat,
-               "restart": restart, "los": los if pressed and things else [], "mon": mon if pressed and things else None,
+               "restart": restart, "reset": reset, "los": los if pressed and things else [], "mon": mon if pressed and things else None,
                "net": net, "M": M}
 
 
@@ -457,7 +473,7 @@ def build(w, h, n=None, hold=input_pad.DEFAULT_HOLD, substation_quality=DEFAULT_
 
     # Pad right of the screen (beside it: the player zooms in on the lamps), player logic below it.
     px0 = w + 2
-    pad_h = 4 * n + 10
+    pad_h = input_pad.pad_height(n)
     py0 = max(0, (h - pad_h) // 2 - 10)
     pad = input_pad.build_pad(b, px0, py0, n, hold)
     pad_bottom = max(int(e["position"]["y"]) + 1 for e in b.entities)
@@ -478,6 +494,7 @@ def build(w, h, n=None, hold=input_pad.DEFAULT_HOLD, substation_quality=DEFAULT_
     wm_pos = (reg_pos[0] + 4, reg_pos[1])
     restart_pos = (reg_pos[0], reg_pos[1] + 5)
     dead = dead_flag(b, reg_pos[0], reg_pos[1] + 6)
+    reset_pos = (reg_pos[0], reg_pos[1] + 7)
 
     # The monsters' network M: a pole below the turn deciders, left of the writers' columns.
     mnet_pos = (reg_pos[0] + 3, reg_pos[1] + SPEND_ROWS + 1)
@@ -485,7 +502,7 @@ def build(w, h, n=None, hold=input_pad.DEFAULT_HOLD, substation_quality=DEFAULT_
 
     def make(box):
         return player_graph(reg, reg_pos, pad["d1"], held_pos, gate_pos, turn_pos, box, turn,
-                            pad["d3"], pressed_pos, wm_pos, things, turnc, turnc_pos, restart_pos, mnet, mnet_pos)
+                            pad["d3"], pressed_pos, wm_pos, things, turnc, turnc_pos, restart_pos, reset_pos, mnet, mnet_pos)
 
     g, nodes = make(MARGIN)
     lat = nodes["lat"]
@@ -507,6 +524,10 @@ def build(w, h, n=None, hold=input_pad.DEFAULT_HOLD, substation_quality=DEFAULT_
         e = ent_p[n.id][1]
         b.wire(e, RED_OUT, e, RED_IN)            # onto the bus (it reads it)
         b.wire(e, GREEN_OUT, reg, GREEN_IN)      # and REG's green input
+    for n, m in zip(nodes["reset"], nodes["restart"]):   # the reset button: the same two networks
+        e, f = ent_p[n.id][1], ent_p[m.id][1]
+        b.wire(e, RED_OUT, f, RED_OUT)
+        b.wire(e, GREEN_OUT, f, GREEN_OUT)
     # Weapon state onto the bus (REG's red output), ammo spent into REG's input: chained. Most bus
     # writers also read the bus (not the relays: HELD, PRESSED), so their chain joins it through
     # one's own input.
@@ -570,18 +591,23 @@ def build(w, h, n=None, hold=input_pad.DEFAULT_HOLD, substation_quality=DEFAULT_
 # it and punch four times (a flinch each time, and it doesn't attack meanwhile); stop, and it
 # scratches us to death. Dead: fire, switch, turn and walk (all ignored), then Use: a new game
 # (monsters back where they started, asleep), walk, and hold fire for 2.7 s (the face's rampage).
+# Then, alive, mid-walk and mid-switch, the reset button: another new game; walk and fire.
+# The fist: the BFG selected, the plasma rifle instead while it lowers (it comes up), the fist
+# while that rises (it lowers again), the fist again (no change).
 FIGHT_SCRIPT = [("ring 1,0", 680, 704), ("fire", 725, 727),
-                ("weapon", 800, 801), ("ring -1,0", 800, 836), ("ring -1,0", 848, 848), ("fire", 875, 877),
-                ("weapon", 1000, 1001), ("weapon", 1018, 1019), ("weapon", 1036, 1037), ("weapon", 1054, 1055),
+                ("slot 4", 800, 801), ("ring -1,0", 800, 836), ("ring -1,0", 848, 848), ("fire", 875, 877),
+                ("slot 7", 1000, 1001), ("slot 6", 1018, 1019), ("slot 1", 1036, 1037), ("slot 1", 1054, 1055),
                 ("ring 1,0", 1100, 1134), ("ring 0,-1", 1160, 1210), ("ring 1,0", 1225, 1245), ("fire", 1300, 1445),
-                ("fire", 2140, 2150), ("weapon", 2160, 2161), ("ring 1,0", 2170, 2185), ("ring 0,-1", 2190, 2200),
-                ("use", 2215, 2215), ("ring 0,-1", 2240, 2265), ("fire", 2275, 2440)]
+                ("fire", 2140, 2150), ("slot 5", 2160, 2161), ("ring 1,0", 2170, 2185), ("ring 0,-1", 2190, 2200),
+                ("use", 2215, 2215), ("ring 0,-1", 2240, 2265), ("fire", 2275, 2440),
+                ("slot 3", 2450, 2451), ("ring -1,-1", 2450, 2500), ("reset", 2462, 2462), ("fire", 2530, 2540)]
 
 
 def schedule(pad, ticks, seed=2, keys=False):
     """Drops every 8-12 ticks while a button is held. With keys, the same script typed on the
     keyboard instead (mod/doom-input): the keyboard combinators hold a button's signal from the
-    entry's start through its end, and a weapon entry is a one-tick press at its start."""
+    entry's start through its end, and a number, use or reset entry is a one-tick press at its
+    start."""
     # Timing and chest choice from separate generators: the pad's chests per button depend on the
     # screen size, and choice() over a different count would shift the timing, so the walk would
     # differ by size.
@@ -589,23 +615,25 @@ def schedule(pad, ticks, seed=2, keys=False):
     cells = pad["cells"]
     # Weapons: a switch is about 55 ticks (lower, raise); fire during one is ignored.
     script = [("fire", 30, 38),                # pistol: one shot
-              ("weapon", 60, 61),              # -> shotgun
+              ("slot 3", 60, 61),              # -> shotgun
               ("fire", 125, 130),
-              ("weapon", 180, 181),            # -> chaingun, held: refires
+              ("slot 4", 180, 181),            # -> chaingun, held: refires
               ("fire", 245, 300),
-              ("weapon", 280, 281),            # -> rocket launcher, while firing
+              ("slot 5", 280, 281),            # -> rocket launcher, while firing
               ("fire", 345, 350),
-              # Taps further apart than the pad's hold (closer ones are one held press): two
-              # while it lowers (queued: plasma, BFG), one while the BFG rises (lowers again: fist).
-              ("weapon", 400, 401), ("weapon", 418, 419), ("weapon", 436, 437),
+              # While it lowers, the plasma rifle, then the BFG instead (it comes up); while the BFG
+              # rises, the fist (it lowers again).
+              ("slot 6", 400, 401), ("slot 7", 418, 419), ("slot 1", 436, 437),
               ("fire", 480, 485),              # during the switch: ignored
               ("fire", 525, 535),              # punch
-              ("weapon", 560, 561),            # -> pistol
-              ("weapon", 600, 601),            # a press while it rises: lowers again (-> shotgun)
+              ("slot 2", 560, 561),            # -> pistol
+              ("slot 3", 600, 601),            # a press while it rises: lowers again (-> shotgun)
               ("ring 0,-1", 5, 150),           # walk north into the wall ahead: collision
               ("ring 1,0", 165, 230),          # turn right
               ("ring 1,-1", 245, 420),         # forward + right: an arc, sliding on walls
               ("ring 0,1", 430, 520)] + FIGHT_SCRIPT   # back up
+    # Added later, at the end so the drop timing above stays as it was (it draws from rnd in order).
+    script += [("slot 2", 580, 581)]           # the weapon it's switching to: no change
     if keys:
         return key_schedule(pad, script, ticks)
     inserts = []
@@ -624,8 +652,8 @@ def key_schedule(pad, script, ticks):
     for cell, start, end in script:
         if start > ticks - 20:
             continue
-        if cell == "weapon":
-            pressed[start].add(NEXT["name"])
+        if cell.startswith("slot") or cell in ("use", "reset"):
+            pressed[start] |= set(pad["cells"][cell]["signals"])
             continue
         for t in range(start, min(end, ticks - 20) + 1):
             held[t] |= set(pad["cells"][cell]["signals"])
@@ -745,7 +773,7 @@ def reference_states(pad, g, nodes, inserts, ticks, hold, lat):
         ins = {nodes["S"]: net, nodes["H"]: hvec(t - 1), nodes["P"]: pvec(t - 1)}
         if M:
             ins[M] = mnet[t - 1] if t else {}
-        for o in g.evaluate(0, nodes["bus"] + nodes["restart"], ins):
+        for o in g.evaluate(0, nodes["bus"] + nodes["restart"] + nodes["reset"], ins):
             sem.add_into(wm[t], o)
         if aim:
             sem.add_into(wm[t], aim_out(t))
@@ -811,7 +839,7 @@ def verify(path, b, pad, g, nodes, gr, cols, rows, layout, w, h, inserts, ticks,
     # later (ammo spent, pickups, damage).
     rule_bad = []
     stats = {"health": HEALTH, "armor": ARMOR, **AMMO}
-    G, Q = [sem.key(s) for s in tc.GONE], sem.key(QUEUE)
+    G, Q = [sem.key(s) for s in tc.GONE], sem.key(PENDING)
     DK, MK = [sem.key(s) for s in cb.DMG], [sem.key(s) for s in cb.MS]
     mon = nodes.get("mon")
     nm = len(mon.idx) if mon else 0
@@ -826,13 +854,14 @@ def verify(path, b, pad, g, nodes, gr, cols, rows, layout, w, h, inserts, ticks,
     FNK = {name: sem.key(s) for name, s in (("FC", fc.FC), ("RC", fc.RC), ("DC", fc.DC), ("ATK", fc.ATK), ("RND", mo.RND))}
     faces, face_bad = {}, []
     ZK, restarts, dead_ticks = sem.key(RESTART), [], 0
+    _, P_ref, _ = input_pad.reference(pad, inserts, ticks, hold)
     for t in range(1, ticks):
         prev, cur = ref_bus[t - 1], ref_bus[t]
         prevm, curm = ref_m[t - 1], ref_m[t]
         ammo = {k: prev.get(sem.key(s), 0) + hd.START[k] for k, s in AMMO.items()}
         alive = prev.get(sem.key(HEALTH), 0) + hd.START["health"] > 0
         Wn, An, Qn, spent = wp.step(prev.get(W, 0), prev.get(A, 0), prev.get(Q, 0), prev.get(sem.key(FIRE), 0),
-                                    prev.get(sem.key(NEXT), 0), ammo, alive)
+                                    prev.get(sem.key(SEL), 0), ammo, alive)
         tb = {k: prev.get(sem.key(s), 0) for k, s in TOUCH_SIGS.items()}
         tb.update(gone=[prev.get(k, 0) for k in G], dmg=[prev.get(k, 0) for k in DK])
         gone, inc = tc.step(things or [], SPAWN, hd.START, tb) if things else ([0] * 8, {})
@@ -875,6 +904,8 @@ def verify(path, b, pad, g, nodes, gr, cols, rows, layout, w, h, inserts, ticks,
                          CF=[[curm.get(k, 0) for k in q] for q in BK], PD=curm.get(PDK, 0), RND=curm.get(RNDK, 0),
                          PH=curm.get(PHK, 0))
         exp = {k: inc.get(k, 0) - spent.get(k, 0) for k in stats}
+        if prev.get(ZK):   # the REG writers skip a restart tick
+            exp = {k: 0 for k in stats}
         if t + 1 < ticks and cur.get(ZK):   # a restart: REG starts over
             if any(ref[t + 1].values()):
                 rule_bad.append((t, "restart", ref[t + 1]))
@@ -883,9 +914,10 @@ def verify(path, b, pad, g, nodes, gr, cols, rows, layout, w, h, inserts, ticks,
             got_d = {k: ref[t + 1][sem.key(s)] - ref[t][sem.key(s)] for k, s in stats.items()}
             if got_d != exp:
                 rule_bad.append((t, "stats", got_d, exp))
-        # A restart (Use pressed while dead, one tick) and everything the bus holds starts over
-        # (not the arithmetic: offsets, random numbers; nor the sight lines).
-        want_z = int(not alive and prev.get(sem.key(USE), 0) > 0)
+        # A restart (Use pressed while dead, or reset, one tick) and everything the bus holds
+        # starts over (not the arithmetic: offsets, random numbers; nor the sight lines). The reset
+        # decider reads PRESSED directly (the network at t holds P_ref[t - 1]); Use comes relayed.
+        want_z = int(not alive and prev.get(sem.key(USE), 0) > 0) + int(P_ref[t - 1].get(input_pad.RESET, 0) > 0)
         if cur.get(ZK, 0) != want_z:
             rule_bad.append((t, "restart flag", cur.get(ZK, 0), want_z))
         if prev.get(ZK):
@@ -1087,7 +1119,7 @@ def main():
     ap.add_argument("--size", default="160x100")
     ap.add_argument("--button-size", type=int)
     ap.add_argument("--hold", type=int, default=input_pad.DEFAULT_HOLD)
-    ap.add_argument("--ticks", type=int, default=2480)
+    ap.add_argument("--ticks", type=int, default=2560)
     ap.add_argument("--verify", action="store_true")
     ap.add_argument("--keys", action="store_true",
                     help="script the input as the keyboard mod (mod/doom-input) instead of pad drops")

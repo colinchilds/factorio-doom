@@ -12,8 +12,10 @@ Layout (n = button size, 9 at 320x200; see button_size()):
           of their own. Fire is the middle, a crosshair. Steel chests with arrows in wooden chests.
           Indicator lamps in the fire button (n >= 5, and substations that reach): its corners
           for fire, the middle of each edge for that direction (a combo lights two).
-    row:  extra buttons below the ring (use, next weapon, enter), letters in wooden chests,
-          a display panel and an indicator lamp above each.
+    rows: buttons below the ring like a numpad: the weapon slots 1 2 3 / 4 5 6 / 7, then use and
+          enter, glyphs in wooden chests, a display panel and an indicator lamp above each.
+    reset: a new game at any time, right of the ring with a gap of RESET_GAP buttons, so a stray
+          press doesn't hit it; iron chests.
 
 Decoder, all buttons at once as lanes (one virtual signal per button, BUTTON_SIGNALS):
 
@@ -66,9 +68,15 @@ RING = {
     (-1, -1): [FORWARD, LEFT], (1, -1): [FORWARD, RIGHT],
     (-1, 1): [BACK, LEFT], (1, 1): [BACK, RIGHT],
 }
-# Extra buttons: (name, signal, letter).
-EXTRAS = [("use", "signal-U", "U"), ("weapon", "signal-N", "N"), ("enter", "signal-E", "E")]
-BUTTON_SIGNALS = [FORWARD, BACK, LEFT, RIGHT, FIRE] + [s for _, s, _ in EXTRAS]
+USE, RESET = "signal-U", "signal-R"
+# Buttons below the ring, a row of ROW_BUTTONS at a time: (name, signal, glyph). The weapon slots
+# are Doom's number keys (weapons.py WEAPONS "slot"): 1 fist, 2 pistol, ... 7 BFG.
+SLOTS = [(f"slot {k}", f"signal-{k}", str(k)) for k in range(1, 8)]
+EXTRAS = SLOTS + [("use", USE, "U"), ("enter", "signal-E", "E")]
+ROW_BUTTONS = 3
+RESET_BUTTON = ("reset", RESET, "R")
+RESET_GAP = 1   # buttons of empty space between the ring and the reset button
+BUTTON_SIGNALS = [FORWARD, BACK, LEFT, RIGHT, FIRE] + [s for _, s, _ in EXTRAS] + [RESET]
 KEYS_HELD, KEYS_PRESSED = "doom-input:held", "doom-input:pressed"   # the mod finds them by these
 
 
@@ -78,6 +86,17 @@ MAX_BUTTON = 9  # the fire button's chests reach a sum outside the ring across o
 def button_size(h):
     """Chest blocks big enough to hit from a zoom that shows the whole screen: 9 at 200 rows."""
     return min(MAX_BUTTON, max(3, (9 * h + 100) // 200))
+
+
+def row_pitch(n):
+    """Rows from one button row below the ring to the next: display panels, chests, sums."""
+    return n + 3
+
+
+def pad_height(n):
+    """Tiles from the ring's top to the decoder's last row."""
+    rows = -(-len(EXTRAS) // ROW_BUTTONS)
+    return 3 * n + 3 + rows * row_pitch(n) + 3
 
 
 # ---------------------------------------------------------------------------------------------
@@ -121,9 +140,17 @@ def crosshair(n):
 
 FONT = {
     5: {"F": "##### #.... #.... ####. #.... #.... #....", "U": "#...# #...# #...# #...# #...# #...# .###.",
-        "N": "#...# ##..# #.#.# #..## #...# #...# #...#", "E": "##### #.... #.... ####. #.... #.... #####"},
+        "N": "#...# ##..# #.#.# #..## #...# #...# #...#", "E": "##### #.... #.... ####. #.... #.... #####",
+        "R": "####. #...# #...# ####. #.#.. #..#. #...#",
+        "1": "..#.. .##.. ..#.. ..#.. ..#.. ..#.. .###.", "2": ".###. #...# ....# ...#. ..#.. .#... #####",
+        "3": "####. ....# ....# .###. ....# ....# ####.", "4": "...#. ..##. .#.#. #..#. ##### ...#. ...#.",
+        "5": "##### #.... ####. ....# ....# #...# .###.", "6": ".###. #.... #.... ####. #...# #...# .###.",
+        "7": "##### ....# ...#. ..#.. .#... .#... .#..."},
     3: {"F": "### #.. ##. #.. #..", "U": "#.# #.# #.# #.# ###", "N": "##. #.# #.# #.# #.#",
-        "E": "### #.. ##. #.. ###"},
+        "E": "### #.. ##. #.. ###", "R": "##. #.# ##. #.# #.#",
+        "1": ".#. ##. .#. .#. ###", "2": "##. ..# .#. #.. ###", "3": "##. ..# .#. ..# ##.",
+        "4": "#.# #.# ### ..# ..#", "5": "### #.. ##. ..# ##.", "6": ".## #.. ### #.# ###",
+        "7": "### ..# .#. .#. .#."},
 }
 
 
@@ -180,13 +207,13 @@ def build_pad(b, x0, y0, n, hold=DEFAULT_HOLD, meters=False):
     def net(name, *members):
         nets.setdefault(name, []).extend(members)
 
-    def block(cx, cy, wood, name, signals, skip=()):
+    def block(cx, cy, wood, name, signals, skip=(), kind="steel-chest"):
         chests = []
         for y in range(n):
             xs = range(n) if y % 2 == 0 else range(n - 1, -1, -1)
             for x in xs:
                 if (x, y) not in skip:
-                    chests.append(b.chest(cx + x, cy + y, "wooden-chest" if (x, y) in wood else "steel-chest"))
+                    chests.append(b.chest(cx + x, cy + y, "wooden-chest" if (x, y) in wood else kind))
         # Serpentine chain; around a skipped tile the next chest is still within reach.
         b.chain(chests, 1)
         cells[name] = {"chests": chests, "signals": signals}
@@ -232,16 +259,22 @@ def build_pad(b, x0, y0, n, hold=DEFAULT_HOLD, meters=False):
     chests = block(x0 + n, y0 + n, crosshair(n), "fire", [FIRE], skip=spots)
     # Its chests are surrounded by the ring: the sum sits left of the ring, a ring cell away.
     sums.append(sum_comb(x0 - 2, y0 + n, FIRE, chests))
+    def labelled(cx, cy, name, s, ch, kind="steel-chest"):
+        chests = block(cx, cy, letter(n, ch), name, [s], kind=kind)
+        b.display(cx + n // 2, cy - 1, s)
+        lamps.append(lamp(cx + n // 2 + 1, cy - 1, s))
+        sums.append(sum_comb(cx + (n - 2) // 2, cy + n, s, chests))
+
     ye = y0 + 3 * n + 3
     for k, (name, s, ch) in enumerate(EXTRAS):
-        cx = x0 + k * (n + 1)
-        chests = block(cx, ye, letter(n, ch), name, [s])
-        b.display(cx + n // 2, ye - 1, s)
-        lamps.append(lamp(cx + n // 2 + 1, ye - 1, s))
-        sums.append(sum_comb(cx + (n - 2) // 2, ye + n, s, chests))
+        r, c = divmod(k, ROW_BUTTONS)
+        labelled(x0 + c * (n + 1), ye + r * row_pitch(n), name, s, ch)
+    # Reset: right of the ring (past the right button's sum), its lamp level with the ring's top
+    # (a lamp above the screen's top row would move the screen's bounds in fsim's frames).
+    labelled(x0 + 3 * n + 2 + RESET_GAP * n, y0 + 1, *RESET_BUTTON, kind="iron-chest")
 
-    # Decoder core, below the extra buttons' sums.
-    yc = ye + n + 2
+    # Decoder core, below the last row's sums.
+    yc = ye + (len(EXTRAS) - 1) // ROW_BUTTONS * row_pitch(n) + n + 2
     neg = b.arithmetic(x0, yc, EACH, "*", -1, EACH, GREEN)
     d1 = b.decider(x0 + 1, yc, [sem.cond(EACH, ">", 0, RED)], [sem.out(EACH, constant=hold)])
     d2 = b.decider(x0 + 2, yc, [sem.cond(EACH, "<=", 0, RED), sem.cond(EACH, ">", 0, GREEN, compare_type="and")],
@@ -303,9 +336,10 @@ def schedule(pad, hold, seed=1):
         ("fire", 170, 170),                                        # tap fire
         ("ring -1,-1", 210, 270),                                  # hold forward+left
         ("ring 0,-1", 280, 310), ("ring 1,-1", 318, 350),          # sweep along the top
-        ("weapon", 400, 400), ("weapon", 400 + hold // 2, 400 + hold // 2),  # double tap, inside hold
-        ("weapon", 470, 470), ("weapon", 470 + hold + 15, 470 + hold + 15),  # two taps, apart
-        ("ring 1,1", 560, 620), ("enter", 660, 660), ("use", 690, 720),
+        ("slot 3", 400, 400), ("slot 3", 400 + hold // 2, 400 + hold // 2),  # double tap, inside hold
+        ("slot 5", 470, 470), ("slot 5", 470 + hold + 15, 470 + hold + 15),  # two taps, apart
+        ("slot 1", 480, 480), ("slot 7", 500, 500),                          # two buttons at once
+        ("ring 1,1", 560, 620), ("enter", 660, 660), ("use", 690, 720), ("reset", 700, 700),
     ]
     inserts = []
     for cell, start, end in script:

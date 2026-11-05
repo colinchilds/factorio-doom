@@ -232,7 +232,8 @@ Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► sp
 
 9. **Weapons (`demos/weapons.py`, 2026-11-02, user request; overlay reworked by item 12):** seven Freedoom weapons (pistol,
    shotgun, chaingun, rocket launcher, plasma rifle, BFG, fist; art in
-   `assets/freedoom/weapons.json`), "next weapon" cycles them, and fire plays Doom's animation
+   `assets/freedoom/weapons.json`), the number buttons select them (item 18; "next weapon"
+   cycled them before), and fire plays Doom's animation
    with its muzzle flash.
    - **Pictures:** Doom's weapon states (info.c) converted from tics to ticks; the flash layer is
      composed over the gun at build time, giving 32 composites ("pictures"). Placed like
@@ -253,23 +254,23 @@ Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► sp
    - **Cost:** before item 12: 469 / 1,184 / 2,347 overlay deciders plus one compositor per view
      row at 64×40 / 160×100 / 320×200.
    - **State (game):** W (weapon index, 0 = pistol), A (animation tick: 0 ready, 1..L firing,
-     128.. lowering, 155 down, 192.. raising) and D (switches queued) live on the state bus, REG's
+     128.. lowering, 155 down, 192.. raising) and P (the pending weapon, item 18; D, switches
+     queued, before) live on the state bus, REG's
      red output network, held by deciders that read the bus and write back onto it
-     (`weapons.logic`, 10 deciders): queue hold/add/take, weapon hold/next, anim advance (copy A
+     (`weapons.logic`): pending set/hold, weapon hold/set, anim advance (copy A
      + 1), start (A = 1), lower, down (hold), raise. Fire held from ready starts the cycle if
      there's ammo; at A = R (Doom's A_ReFire) it restarts while fire is held, else runs on to L
      and back to 0. Per weapon a spend decider at its shots' A values (with an ammo check each,
-     so the chaingun's second shot) writes `ammo -cost` into REG's input. Relays (`F + 0`,
-     `N + 0`) put fire held and next pressed onto the bus, so every weapon decider reads one
-     network. The raycaster's picture F is a lookup on `W * 256 + A`, its bits sized from the table: the
+     so the chaingun's second shot) writes `ammo -cost` into REG's input. Relays put fire held
+     and the selected weapon (SEL) onto the bus, so every weapon decider reads one network. The raycaster's picture F is a lookup on `W * 256 + A`, its bits sized from the table: the
      88 pictures need 7, and with 6 (sized for the first 32) the BFG and fist drew the pistol's
      and shotgun's pictures, which the checks missed (they evaluate the same lookup). The user
      found it in game; `lookup_scalar` now refuses values that don't fit its bits.
-   - **Switching:** a "next" press adds 1 to D. While D > 0 a ready or firing gun starts lowering
-     (cancelling a shot); down, each tick with D > 0 steps W and takes 1 from D, then the gun
-     rises (and lowers again at once if presses came while it rose). So several quick taps cost
-     one lower and one raise, about 0.9 s. Fire is ignored while switching. Taps closer than
-     the pad's hold (14 ticks) are one press to the pad.
+   - **Switching (item 18 since 2026-11-03):** selecting another weapon sets P; while P > 0 a
+     ready or firing gun starts lowering (cancelling a shot); at the bottom W becomes P - 1, then
+     the gun rises (and lowers again at once if a selection came while it rose). A selection
+     while it lowers replaces P, so one lower and one raise, about 0.9 s. Fire is ignored while
+     switching.
    - **Checks:** game `--verify` also compares the bus (fsim `--net`) with the reference every
      tick, and the reference with `weapons.step`, the same rules written as plain Python: 0
      differ at 64×40, 160×100 and 320×200, frames exact. The real game matches the 64×40 build
@@ -398,7 +399,7 @@ Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► sp
      - Turning stops through a dead-flag decider (`dead_flag`, next to REG). It reads the bus on
        red, and its green output joins the turn counter's network, where the turn deciders require
        `DEAD` (`signal-O`) = 0. The bus is red-only, so the flag needs a network of its own.
-     - The gun lowers and stays down, as in Doom's A_Lower, and fire and next-weapon are ignored
+     - The gun lowers and stays down, as in Doom's A_Lower, and fire and weapon selections are ignored
        (`weapons.logic(..., health)`, `weapons.step(..., alive)`).
    - **Restart:**
      - A relay puts Use (`signal-U`, pad or keyboard) on the bus. While dead, a decider next to REG
@@ -408,10 +409,11 @@ Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► sp
        increments on red. It drops everything on that tick, so REG is exactly 0 the next tick
        (negating REG into its input would lag and race the increments).
      - Every bus writer gets `RESTART = 0` ANDed into each clause (`gated`), so everything the bus
-       holds drops to 0 together: weapon, animation, queue, GONE, COOL, DMG, MS. Items come back
-       and monsters come back alive.
-     - The REG writers need no gate: REG drops its input that tick, and none of them fires for a
-       dead player.
+       holds drops to 0 together: weapon, animation, pending weapon, GONE, COOL, DMG, MS. Items
+       come back and monsters come back alive.
+     - The REG writers needed no gate while only a dead player could restart (REG drops its input
+       that tick, and none of them fires for a dead player); the reset button (item 18) gated them
+       too.
    - **Cost:** two deciders and a relay. No latency.
    - **Checks:** game `--verify` ran `DEATH_SCRIPT` after the fight (default `--ticks` 2280; part of `FIGHT_SCRIPT` since item 15):
      - Walk up to the zombieman and die there.
@@ -572,6 +574,38 @@ Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► sp
       0 pixels on 109 frames, 26 faces). The 64×40 game matches a Space Age game on 14,225,583
       checks (2,480 ticks, `--dlc --warmup 60 --every 2`). 320×200: 78,442 entities, 1.17 ms per
       tick in Space Age, fully powered; blueprint string 8.2 MB.
+
+18. **Weapon keys and reset (2026-11-03, user request):** number buttons pick a weapon (Doom's
+    slots), and a reset button starts a new game at any time.
+    - **Pad (`input_pad.py`):** the next-weapon button is gone. Below the ring, like a numpad: 1 2 3 /
+      4 5 6 / 7 U E (`SLOTS`, `ROW_BUTTONS`; lanes `signal-1`..`7`), and reset (`signal-R`, iron
+      chests) right of the ring with a button's gap (`RESET_GAP`). `pad_height(n)` sizes the pad
+      for game.py.
+    - **Selection:** per slot a decider reads PRESSED and puts SEL (`signal-N`, the weapon's index
+      + 1; slot k is `weapons.slot_index(k)`) on the bus for a tick; the highest slot wins if two
+      are pressed at once. Doom's pendingweapon replaces the switch queue: P (`signal-Q`) is set by
+      a selection of another weapon (one decider per weapon, since a decider can't copy SEL onto
+      P), held until the bottom, where W becomes P - 1 (one decider per weapon but the pistol).
+      A later selection replaces P; selecting the current weapon changes nothing.
+    - **Reset:** a decider reading PRESSED (fixed below the dead flag) outputs RESTART onto the
+      restart decider's two networks (the bus and REG's green input). The REG writers (ammo spent,
+      pickups, damage) are now gated by RESTART = 0 too: reading the bus on the restart tick, the
+      old game's state would land in the new one. Movement after a reset uses corners from the old
+      position for lat + 2 ticks: at most 3 steps of 10 from the spawn, at a tile's centre, so the
+      box (48 + 30 < 128) stays inside the spawn tile.
+    - **Keyboard mod 0.3.0:** keys 1-7, use (F) and reset (Ctrl+Shift+R) are one-tick presses; the
+      next-weapon link is gone. The number keys still select quickbar slots.
+    - **Script:** every switch is a selection now (an override while lowering, a selection while
+      rising, the current weapon again), and the fight ends with a reset mid-walk and mid-switch,
+      then fire (`--ticks` 2560). New entries go at the end of the list: drop timing is drawn in
+      order, and an entry in the middle changed the walk (the player didn't die).
+    - **Cost:** 24 more combinators: 8,932 / 10,178 / 12,475 at 64×40 / 160×100 / 320×200. No
+      latency.
+    - **Checks:** input_pad `--verify` 0 differ at n = 3, 5 and 9; game `--verify` 0 differ at all
+      three sizes, restarts at 2218 (Use, dead) and 2464 (reset, alive), and `--keys` at 64×40;
+      the mod loads in a headless game and writes one-tick presses.
+      The 64×40 game matches a Space Age game on 14,723,814 checks (2,560 ticks, `--dlc --warmup 60
+      --every 2`). 320×200: 79,060 entities, 1.07 ms per tick in Space Age, fully powered.
 
 Still to come (M4): doors; see "Next steps".
 
@@ -828,8 +862,12 @@ Decided with the user:
     One cursor can't hold two buttons, so the combos have to be buttons of their own.
   - Fire is in the middle, drawn as a crosshair (user request).
   - Steel chests, with arrows in wooden chests.
-  - Use, next weapon and enter sit in a row below, with letters in wood, a display panel icon
-    and an indicator lamp. No strafe for now.
+  - Below the ring, like a numpad: the weapon slots 1 2 3 / 4 5 6 / 7, then use and enter, with
+    glyphs in wood, a display panel icon and an indicator lamp (item 18; use, next weapon and
+    enter before). No strafe for now.
+  - Reset (item 18): right of the ring with a button's gap, in iron chests with an R, so a stray
+    drop can't hit it. Its lamp sits level with the ring's top: a lamp above the screen's top row
+    moved the screen's bounds in fsim's frames (every frame differed).
   - **Limits:**
     - n ≤ 9: the fire button's chests wire across one ring cell to their sum.
     - The fire button's indicator lamps (corners = fire, edge middles = directions) only get
@@ -866,10 +904,12 @@ The blueprint stays vanilla; the mod is an optional input path ("the input is so
   so the mod teleports it back. The game moves the player after on_tick, so a teleport there
   left each held tick's move on screen (the user saw bad jitter); the teleport now runs in
   on_player_changed_position, right after the move and before the frame is drawn (on_tick still
-  catches moves within a tile). The user confirmed it works well. Tab opens the map; next-weapon (C for the user) arrives as a linked control.
+  catches moves within a tile). The user confirmed it works well. Tab opens the map.
 - **Mapping:** walking direction -> signal-W/S/A/D (diagonals give the combos), shooting ->
-  signal-F, all 1 while held; next-weapon -> signal-N and its own "use" input (F) -> signal-U, one
-  tick each. Linked press events fill the tick before `walking_state` follows. The arrow keys work
+  signal-F, all 1 while held; its own inputs 1-7 -> signal-1..7 (weapon slots), use (F) ->
+  signal-U and reset (Ctrl+Shift+R) -> signal-R, one tick each (since 0.3.0, item 18; before,
+  the game's next-weapon control -> signal-N). The number keys keep selecting quickbar slots
+  (consuming "none": consuming them would take them while the mod is off too). Linked press events fill the tick before `walking_state` follows. The arrow keys work
   once bound as alternative movement keys in Settings > Controls.
 - **UI:** a toggleable shortcut-bar button (a joystick icon, `tools/mod_icon.py`) and
   Ctrl+Shift+J. Toggling on scans for the tagged combinators and anchors the camera.
@@ -894,8 +934,9 @@ right, then the player logic below the pad.
   - **Contact state (2026-11-02):** the items' GONE flags (and until item 15 the pain clock COOL) on the bus
     (architecture item 10); their deciders join the weapon columns (bus writers, then the REG
     writers in columns of `SPEND_ROWS`, snaking so the chain stays short).
-  - **Weapon state (2026-11-02):** W (`signal-G`) and A (`signal-T`) on the state bus, plus the
-    relayed FIRE and NEXT (`signal-N`); see architecture item 9. The weapon deciders sit two
+  - **Weapon state (2026-11-02):** W (`signal-G`), A (`signal-T`) and the pending weapon P
+    (`signal-Q`) on the state bus, plus the relayed FIRE and SEL (`signal-N`, the selected
+    weapon's index + 1); see architecture items 9 and 18. The weapon deciders sit two
     columns right of the turn deciders (`wm_pos`): bus writers chained to REG's red output,
     spend deciders chained to its red input.
   - **Finer turning (user request, 2026-11-01):** 2 view angles per tick (a turn in 2.1 s,
@@ -1012,6 +1053,7 @@ Done:
 - Monsters (architecture item 15): wake, chase around walls, attack on Doom's timing, flinch.
 - Muzzle light (architecture item 16): the view brightens while a weapon flashes.
 - Face expressions (architecture item 17): glances, turning toward an attacker, rampage.
+- Weapon keys and reset (architecture item 18): number buttons and keys pick weapons; reset any time.
 - Chunks, layout and latency (architecture item 12): six rows per network on signal qualities
   (Space Age), about half the combinators, layout by concept, the bus on a substation row, 17-tick
   raycaster.

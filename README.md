@@ -33,10 +33,11 @@ The tools so far:
   half of them hit). Any hit makes a monster flinch, which stops its attack, so punching works. A Freedoom status bar (`demos/hud.py`) shows
   ammo, health, armor and the face, which glances around, turns toward whatever hurts you and grits
   its teeth when you fire for a while (`demos/face.py`). Seven Freedoom weapons (`demos/weapons.py`): the gun in front
-  of the view, "next weapon" switches, fire plays Doom's animation and uses ammo. Shots hit the
+  of the view, the number buttons pick one (Doom's slots: 1 fist ... 7 BFG), fire plays Doom's animation and uses ammo. Shots hit the
   nearest live monster in the middle of the view (`demos/combat.py`), which flinches with its
   pain frame and dies with Freedoom's death animation, leaving a corpse. At 0 health you're dead
-  (frozen, gun lowered); press Use to start a new game.
+  (frozen, gun lowered); press Use to start a new game. The pad's reset button, set apart to the
+  right of the D-pad, starts a new game at any time.
 - **Demos** (`demos/`): `gradient.py` builds a 16×16 lamp screen laid out like the planned
   renderer's row stage. fsim and the game agree on it lamp for lamp.
 
@@ -113,8 +114,9 @@ python3 harness/run.py --discover                 # export a blueprint with ever
 ### Keyboard input (optional mod)
 
 `mod/doom-input` drives the blueprint from the keyboard: movement keys (WASD, or the arrows once
-bound as alternative movement keys in Settings > Controls) walk and turn, Space fires, the game's
-next-weapon key switches, F is use. Toggle it with the joystick button on the shortcut bar (or
+bound as alternative movement keys in Settings > Controls) walk and turn, Space fires, 1-7 pick
+a weapon, F is use and Ctrl+Shift+R resets (a new game). The number keys still select quickbar
+slots too; rebind any of these under Settings > Controls > Mods. Toggle it with the joystick button on the shortcut bar (or
 Ctrl+Shift+J); while on, the camera stays put. Without the mod the blueprint uses its chest pad.
 
 ```sh
