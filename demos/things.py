@@ -19,7 +19,12 @@ Per column (lanes):
     Zt_s = U + (alpha >> 10) << KB   on columns the box covers (range decider), else absent
     Dt_s = alpha * 64 + frame        the same columns: precise depth with the frame in the low bits
 Two min trees over the things (absent lanes lose) give per column Zt (the key: u, ordered by
-depth first) and Dt (depth and frame). Then:
+depth first) and Dt (depth and frame). With the `back` hook, things that yield (items, dying and
+dead monsters) lose to the rest wherever their boxes overlap: their leaves carry 2^30 more on Zt and
+2^29 more on Dt (only in front of NEAR, so one behind the camera still fails it), and Dt drops it
+after the trees (AND 2^29 - 1; Zt's goes with SK's AND). A live monster behind a corpse is drawn
+whole; the corpse is cut where the monster's box covers it. One tick more (game.py: 18).
+Then:
     SK = Zt AND (2^KB - 1), FR = Dt AND 63 -> lookups per (frame, u): a mask word (bit 31 - t:
         texel row t is opaque) and HP / 8 texel words (8 texels each, like the wall strips)
     row y (r = 2y + 1 - H), texel row t = te + Q below the eye and te - 1 + Q above it, with
@@ -45,7 +50,7 @@ ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(HERE))
 from compiler import semantics as sem  # noqa: E402
-from compiler.netlist import EACH, GREEN, RED, Collect, Scalar  # noqa: E402
+from compiler.netlist import EACH, GREEN, LANE_SIGNALS, RED, Collect, Scalar  # noqa: E402
 from sprite import nearest, pack, quantize  # noqa: E402
 
 ASSETS = ROOT / "assets" / "freedoom" / "sprites.json"
@@ -63,6 +68,7 @@ NEAR = 1 << 16             # alpha of 1/4 tile: nearer (or behind) things aren't
 KILL = 1 << 29             # added to a killed pixel's V
 HIDE = -(1 << 23)          # added to a hidden thing's depth (column_stage hide)
 FRAME_BITS = 6
+YIELD_D = 1 << 29          # added to a yielding thing's Dt leaf (Dt = alpha * 64 + frame < 2^29)
 COLORS = 15                # thing texels 1..15, 0 = transparent
 
 # Things on the map: (x, y) in tiles and the sprite frame. Our placement, Freedoom's art.
@@ -172,7 +178,7 @@ def tree(g, level, name, levels=None):
 
 
 def column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_v, shade, hide=None, frame=None, plane=676,
-                 pos=None, light=None):
+                 pos=None, light=None, back=None):
     """The per-thing scalars, the per-column key/depth vectors and the lookup blocks. Returns a dict
     of nodes for the row stage (all timed against t_v, the wall V's time), and each thing's depth
     and lateral offset ("alpha", "lat": Scalars) for the aim (combat.py).
@@ -191,7 +197,11 @@ def column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_v, shade,
     monster's position from the state bus), or None for its fixed place.
 
     light: the muzzle light's LS = 512 / LK (raycast.LIGHT_K), or None: Dt / LS (about LK times the
-    thing's D) joins the brightness numerator, so things brighten with the walls."""
+    thing's D) joins the brightness numerator, so things brighten with the walls.
+
+    back(g, i): None (thing i never yields), True (always: an item) or a Scalar, 1 while it yields
+    (a dying or dead monster), or no hook at all. Yielding things lose the trees to the rest (see
+    the module docstring); the trees then need one more tick (t_v - 5)."""
     if len(things) > 8:
         raise ValueError(f"{len(things)} things: at most 8 fit in the latency budget")
     X0, Y0, (ox, oy) = pos0
@@ -202,6 +212,7 @@ def column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_v, shade,
     types = sprites["types"]
     KB = key_bits(types)
     qd = QD + max(0, KB - 17) if hide else QD
+    yz = (1 << 30) >> KB   # in dc units: 2^30 on Zt (dc << KB stays below 2^30)
     zleaves, dleaves, alphas, lats, rows = [], [], [], [], []
     for i, (tx, ty, name) in enumerate(things):
         ex, ey = int(tx * 256), int(ty * 256)
@@ -224,25 +235,44 @@ def column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_v, shade,
         lats.append(lat)
         sigma = g.ss(alpha, "/", div_sigma(plane), f"sigma{i}")
         dc = g.ss(alpha, ">>", qd, f"dc{i}")
+        yl = back(g, i) if back else None
+        ybias = []
+        if yl is not None and yl is not True:
+            # Yielding, and in front of NEAR (so the bias can't lift one behind the camera past it):
+            # yz onto dc's wire, YIELD_D onto every column of the Dt leaf's green input.
+            yc = [sem.cond(alpha.signal, ">=", NEAR, RED), sem.cond(yl.signal, ">", 0, RED, "and")]
+            yzn = g.decider(yc, [sem.out(dc.signal, constant=yz)], red=[alpha.node, yl.node], label=f"yield z{i}")
+            ybias = [g.decider(yc, [sem.out(s_, constant=YIELD_D) for s_ in LANE_SIGNALS[:w]], red=[alpha.node, yl.node],
+                               label=f"yield d{i}")]
+            dc = Scalar(Collect([dc.node, yzn]), dc.signal)
         U = [g.vs(vec(camx, "camx"), "*", sigma, f"u{i}"), g.vs(vec([-1] * w, "-1"), "*", lat, f"lat{i}")]
         ZB = g.vs(vec([1 << KB] * w, "2^KB"), "*", dc, f"zb{i}")
         DB = g.vs(vec([1 << FRAME_BITS] * w, "64"), "*", alpha, f"db{i}")
         texw = types[name[:4]]
         C = (texw // 2 + 1) << F
+        static = yl is True   # an item: the bias rides on the leaves' constant outputs
         rng = [sem.cond(EACH, ">=", -(texw // 2) << F, RED), sem.cond(EACH, "<", (texw // 2) << F, RED, "and")]
         zleaves.append(g.decider(rng + [sem.cond(EACH, ">=", (NEAR >> qd) << KB, GREEN, "and")],
-                                 [sem.out(EACH, constant=C), sem.out(EACH, networks=RED), sem.out(EACH, networks=GREEN)],
+                                 [sem.out(EACH, constant=C + ((yz << KB) if static else 0)), sem.out(EACH, networks=RED),
+                                  sem.out(EACH, networks=GREEN)],
                                  red=U, green=ZB, label=f"zt{i}"))
         fo = frame(g, i, fid) if frame else None
         DF = [DB, g.broadcast(vec([1] * w, "ones"), fo, f"frame{i}")] if fo else DB
+        if ybias:
+            DF = (DF if isinstance(DF, list) else [DF]) + ybias
         dleaves.append(g.decider(rng + [sem.cond(EACH, ">=", NEAR << FRAME_BITS, GREEN, "and")],
-                                 [sem.out(EACH, constant=fid[name]), sem.out(EACH, networks=GREEN)],
+                                 [sem.out(EACH, constant=fid[name] + (YIELD_D if static else 0)), sem.out(EACH, networks=GREEN)],
                                  red=U, green=DF, label=f"dt{i}"))
         rows.append([rx.node, ry.node] + parts[:2] + lat.node.nodes + ([hid.node] if hid is not None else [])
-                    + [sigma.node, dc.node] + U + [ZB, DB] + (DF[1:] if fo else []) + [zleaves[-1], dleaves[-1]])
+                    + [sigma.node] + (dc.node.nodes if isinstance(dc.node, Collect) else [dc.node]) + U + [ZB, DB]
+                    + (DF[1:] if isinstance(DF, list) else []) + [zleaves[-1], dleaves[-1]])
     tz, td = [], []
     Zt, Dt = tree(g, zleaves, "zmin", tz), tree(g, dleaves, "dmin", td)
     at = t_v - 4
+    strip = []
+    if back:
+        Dt = g.vc(Dt, "AND", YIELD_D - 1, "thing depth strip")
+        strip = [Dt]
     if Zt.time > at or Dt.time > at:
         raise ValueError(f"thing path too long: trees at {max(Zt.time, Dt.time)}, needed by {at}")
     Zt, Dt = g.delay(Zt, at - Zt.time), g.delay(Dt, at - Dt.time)
@@ -274,7 +304,7 @@ def column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_v, shade,
     BRS = g.vv([vec([shade.bright] * w, "bright")] + lit, "/", [SD, vec([shade.fog] * w, "fog")], "thing brightness")
     return {"Zt": Zt, "Dt": Dt, "SK": SK, "FR": FR, "NSD": NSD, "BRS": BRS, "lit": lit, "masks": masks, "words": words,
             "wsum": wsum, "lookups": masks + [n for ws in words for n in ws], "KB": KB, "alpha": alphas, "lat": lats,
-            "rows": rows, "trees": (tz, td), "tail": [Zt, Dt, SK, FR, NSD, SD], "tables": [DX, DY, NDY]}
+            "rows": rows, "trees": (tz, td), "tail": strip + [Zt, Dt, SK, FR, NSD, SD], "tables": [DX, DY, NDY]}
 
 
 # ---------------------------------------------------------------------------------------------

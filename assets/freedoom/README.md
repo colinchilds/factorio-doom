@@ -6,10 +6,11 @@ attack and pain frames and their death frames (rotation 0), and the items and de
 `BAR1A0`, `BAR1B0`, `MEDIA0`, `STIMA0`, `CLIPA0`, `ARM1A0` and `COLUA0`, and the pickups
 `SHELA0`, `SBOXA0`, `AMMOA0`, `ROCKA0`, `CELLA0` and `ARM2A0`.
 
-`textures.json` holds six wall textures composed from their patches (TEXTURE1 + PNAMES):
-STARTAN3, BRICK7, MARBLE1, SP_HOT1, STONE2 and WOOD1, as palette indexes, plus the same palette.
-Its `flats` holds six 64×64 floor/ceiling flats (rows of palette indexes): FLOOR4_8, CEIL3_5,
-FLOOR5_1, FLOOR7_1, TLITE6_4 and FLAT5_4.
+`textures.json` holds eight wall textures composed from their patches (TEXTURE1 + PNAMES):
+STARTAN3, BRICK7, MARBLE1, SP_HOT1, STONE2, WOOD1, BROWNGRN and TEKGREN2, as palette indexes, plus
+the same palette. Its `flats` holds nine 64×64 floor/ceiling flats (rows of palette indexes):
+FLOOR4_8, CEIL3_5, FLOOR5_1, FLOOR7_1, TLITE6_4, FLAT5_4, FLOOR5_2, NUKAGE1 and CEIL5_1
+(`--export-flats`).
 
 `hud.json` holds the status bar lumps in the same format: STBAR, STARMS, STTPRCNT, the big
 digits STTNUM0–9, the small digits STYSNUM0–9 and STGNUM0–9, and every face: STFST00–42 (pain

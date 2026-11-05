@@ -97,6 +97,7 @@ python3 demos/input_pad.py --size 320x200 --verify   # -> demos/gen/input_pad_n9
 # The game (M2 movement + M3 textured walls, floors, ceilings): the raycaster driven by the pad (walk, turn, collide);
 # player state vs reference, frames
 python3 demos/game.py --size 160x100 --verify      # -> demos/gen/game_160x100.{json,txt}
+python3 demos/game.py --size 160x100 --map acid    # the showcase map (demos/maps.py) -> game_160x100_acid.{json,txt}
 
 # Sprite demo: generate, check every frame against the reference, preview as a GIF
 python3 demos/sprite.py --size 160x100 --verify    # -> demos/gen/sprite_160x100.{json,txt}

@@ -6,7 +6,9 @@ and hurt you on contact, every 40 ticks, so the fist was useless). Doom's behavi
              (the major axis) and the other one, sliding along walls; when one corner of a wall blocks
              the major axis, it steps sideways off that corner first (Doom tries other directions);
              one full walk cycle after waking, an attack or a flinch, then an attack attempt at
-             each of Doom's A_Chase calls, with Doom's chance by distance (P_CheckMissileRange)
+             each of Doom's A_Chase calls, with Doom's chance by distance (P_CheckMissileRange), and
+             none beyond 5 tiles (user request 2026-11-04: Doom's attack from anywhere in sight, which
+             hurt from across the room the moment the game started)
     attack   Doom's attack frames; at the shot frame, if the player is still in sight: the imp
              scratches within a tile (always hits) or throws a fireball (hits half the time: there
              are no projectiles yet), the zombieman fires (hit chance from Doom's spread)
@@ -112,14 +114,14 @@ TILE_DMG = 3              # applied per tick from PD
 # (1/FP tiles per tick: Doom's 8 units per A_Chase), and per distance band the chance of an
 # attack per A_Chase (P_CheckMissileRange, 1 - min(dist - 64 (- 128 without melee), 200) / 256) and
 # of a hit (the zombieman's spread, +-22 degrees, against the player's 16 unit radius; the imp's
-# fireball without projectiles: half).
+# fireball without projectiles: half). No attacks from the last band (beyond 5 tiles): Doom's 22%.
 TYPES = {
     "TROO": {"walk": [("TROOA1", 6), ("TROOB1", 6), ("TROOC1", 6), ("TROOD1", 6)], "chase": 3,
              "attack": [("TROOE1", 8), ("TROOF1", 8), ("TROOG1", 6)], "fire": 16, "damage": 12, "speed": 3,
-             "melee": True, "chance": [1.0, 0.5, 0.22, 0.22, 0.22], "hit": [1.0, 0.5, 0.5, 0.5, 0.5]},
+             "melee": True, "chance": [1.0, 0.5, 0.22, 0.22, 0.0], "hit": [1.0, 0.5, 0.5, 0.5, 0.5]},
     "POSS": {"walk": [("POSSA1", 8), ("POSSB1", 8), ("POSSC1", 8), ("POSSD1", 8)], "chase": 4,
              "attack": [("POSSE1", 10), ("POSSF1", 8), ("POSSE1", 8)], "fire": 10, "damage": 9, "speed": 2,
-             "melee": False, "chance": [1.0, 1.0, 0.5, 0.3, 0.22], "hit": [0.64, 0.38, 0.24, 0.15, 0.1]},
+             "melee": False, "chance": [1.0, 1.0, 0.5, 0.3, 0.0], "hit": [0.64, 0.38, 0.24, 0.15, 0.1]},
 }
 # Which way each monster faces (thing index -> unit vector): it notices the player in that half
 # plane (Doom: 180 degrees), or within a tile. Our placement.
@@ -329,7 +331,7 @@ class Monsters:
         nest and the chances fall with distance, so this is the chance of the nearest band holding
         the player."""
         return [extra + self.band(k, b) + ([(RK[k], "<", threshold(p))] if threshold(p) is not None else [])
-                for b, p in enumerate(probs)]
+                for b, p in enumerate(probs) if p > 0]
 
     def specs(self):
         """[(label, spec, target[, inputs])]: deciders reading the bus (red) and M (green) and

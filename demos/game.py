@@ -68,12 +68,13 @@ import combat as cb  # noqa: E402
 import face as fc  # noqa: E402
 import hud as hd  # noqa: E402
 import input_pad  # noqa: E402
+import maps  # noqa: E402
 import monsters as mo  # noqa: E402
 import music  # noqa: E402
 import raycast  # noqa: E402
 import touch as tc  # noqa: E402
 import weapons as wp  # noqa: E402
-from raycast import FP, MAP, trig  # noqa: E402
+from raycast import FP, trig  # noqa: E402
 
 RED_IN, GREEN_IN, RED_OUT, GREEN_OUT = 1, 2, 3, 4
 SX, SY, SR = sig("signal-X"), sig("signal-Y"), sig("signal-R")
@@ -87,7 +88,7 @@ RESTART = sig("signal-Z")  # one tick: Use pressed while dead, or reset (on the 
 DEAD = sig("signal-O")     # the player is dead (on the turn counter's network: no turning)
 BUS = STATE + [WEAPON, ANIM, PENDING, FIRE, SEL, USE, TURNC, RESTART, DEAD] + tc.GONE + cb.SIGNALS + mo.SIGNALS + fc.BUS
 TOUCH_SIGS = {"SX": SX, "SY": SY, "health": HEALTH, "armor": ARMOR, **AMMO}
-SPAWN = (int(8.5 * FP), int(12.5 * FP))
+SPAWN = (int(8.5 * FP), int(12.5 * FP))   # the current map's (maps.py; main sets it)
 assert SPAWN[0] % 2 == 0 and SPAWN[1] % 2 == 0, "camera_from folds SPAWN in after the | 1"
 A0 = 192           # spawn facing north (angle 0 is east, angles grow clockwise on screen)
 SPEED = 10         # 1/FP tiles per tick while walking: 2.3 tiles a second
@@ -114,7 +115,7 @@ SPEND_ROWS = 24    # REG-input deciders (ammo spent, pickups, damage) per column
 
 
 def walls():
-    return [(x, y) for y, row in enumerate(MAP) for x, c in enumerate(row) if raycast.is_wall(c)]
+    return [(x, y) for y, row in enumerate(raycast.MAP) for x, c in enumerate(row) if raycast.is_wall(c)]
 
 
 def dead_terms(first=True):
@@ -425,6 +426,18 @@ def camera_from(port, port_pos, things=(), turn=DEFAULT_TURN, light=False):
             return None
         return g.lookup_scalar(g.scalar(g_port[0], cb.MS[i]), cb.frame_offsets(things[i][2], fid), 6, f"frame {i}")
 
+    def back(g, i):
+        """Thing i yields to live monsters where boxes overlap (things.column_stage): items always,
+        a monster while dying or dead (DEATH <= MS < mo.FRESH)."""
+        if i in hidden:
+            return True
+        if i not in mons:
+            return None
+        s = g.new_scalar_signal()
+        n = g.decider([sem.cond(cb.MS[i], ">=", cb.DEATH, RED), sem.cond(cb.MS[i], "<", mo.FRESH, RED, "and")],
+                      [sem.out(s, constant=1)], red=[g_port[0]], label=f"yields {i}")
+        return Scalar(n, s)
+
     order = {i: k for k, i in enumerate(tc.monsters(things or []))}
 
     def pos(g, i):
@@ -457,7 +470,7 @@ def camera_from(port, port_pos, things=(), turn=DEFAULT_TURN, light=False):
         PX, PY = ((lambda o: Scalar(Collect([o.node, g.const([(o.signal, sp)], "spawn")]), o.signal))(g.ss(p, "OR", 1, n))
                   for p, sp, n in ((X0, SPAWN[0], "px"), (Y0, SPAWN[1], "py")))
         extra = {"port": S, "angle_offset": A0, "angle_sub": ANGLE_SUB, "angle_range": angle_range(turn),
-                 "pos0": (X0, Y0, SPAWN), "hide": hide}
+                 "pos0": (X0, Y0, SPAWN), "hide": hide, "back": back}
         if mons:
             extra.update(frames=cb.frames(things), frame=frame, aim=aim, thing_pos=pos)
         if light:
@@ -836,7 +849,7 @@ def verify(path, b, pad, g, nodes, gr, cols, rows, layout, w, h, inserts, ticks,
     ins_path = path.with_suffix(".inserts.json")
     ins_path.write_text(json.dumps(inserts))
     reg = nodes["S"].spec["entity"]
-    out_dir = ROOT / "out" / f"game_{w}x{h}_ppm"
+    out_dir = ROOT / "out" / f"game_{w}x{h}{maps.suffix()}_ppm"
     out_dir.mkdir(parents=True, exist_ok=True)
     for f in out_dir.glob("*.ppm"):
         f.unlink()
@@ -1052,7 +1065,7 @@ def verify(path, b, pad, g, nodes, gr, cols, rows, layout, w, h, inserts, ticks,
             xy = {i: ((int(things[i][0] * FP) + src.get(sem.key(mo.MX[k]), 0)) / FP,
                       (int(things[i][1] * FP) + src.get(sem.key(mo.MY[k]), 0)) / FP)
                   for k, i in enumerate(tc.monsters(things or []))}
-            fa, fcl, margin = cb.ideal_aim(things, x, y, ang, [src.get(k, 0) for k in DK], raycast.is_wall, MAP,
+            fa, fcl, margin = cb.ideal_aim(things, x, y, ang, [src.get(k, 0) for k in DK], raycast.is_wall, raycast.MAP,
                                             w, layout["view"].plane, xy)
             if (ref_bus[t].get(sem.key(cb.AIM), 0), ref_bus[t].get(sem.key(cb.CLOSE), 0)) != (fa, fcl):
                 if margin < NEAR_TIE:
@@ -1122,7 +1135,7 @@ def verify(path, b, pad, g, nodes, gr, cols, rows, layout, w, h, inserts, ticks,
 
     def touches(t):
         x, y = ref[t][sem.key(SX)] + SPAWN[0], ref[t][sem.key(SY)] + SPAWN[1]
-        if any(raycast.is_wall(MAP[(y + dy) >> 8][(x + dx) >> 8]) for dx in (-MARGIN, MARGIN) for dy in (-MARGIN, MARGIN)):
+        if any(raycast.is_wall(raycast.MAP[(y + dy) >> 8][(x + dx) >> 8]) for dx in (-MARGIN, MARGIN) for dy in (-MARGIN, MARGIN)):
             return True
         live = lambda alive: all(ref_bus[t].get(sem.key(s), 0) < v for s, _, v in alive)  # noqa: E731
         moved = [(mx + ref_bus[t].get(sem.key(mo.MX[k]), 0), my + ref_bus[t].get(sem.key(mo.MY[k]), 0), alive)
@@ -1132,7 +1145,7 @@ def verify(path, b, pad, g, nodes, gr, cols, rows, layout, w, h, inserts, ticks,
     def in_wall(t):
         for k, (mx, my, _) in enumerate(mons):
             x, y = mx + ref_bus[t].get(sem.key(mo.MX[k]), 0), my + ref_bus[t].get(sem.key(mo.MY[k]), 0)
-            if any(raycast.is_wall(MAP[(y + dy) >> 8][(x + dx) >> 8]) for dx in (-40, 40) for dy in (-40, 40)):
+            if any(raycast.is_wall(raycast.MAP[(y + dy) >> 8][(x + dx) >> 8]) for dx in (-40, 40) for dy in (-40, 40)):
                 return True
         return False
     stuck = [t for t in range(ticks) if in_wall(t)]
@@ -1199,7 +1212,12 @@ def main():
     quality_arg(ap)
     raycast.shading_args(ap)
     raycast.view_args(ap)
+    maps.map_arg(ap)
     a = ap.parse_args()
+    m = maps.select(a.map)
+    global SPAWN, A0
+    SPAWN, A0 = (int(m["spawn"][0] * FP), int(m["spawn"][1] * FP)), m["a0"]
+    assert SPAWN[0] % 2 == 0 and SPAWN[1] % 2 == 0, "camera_from folds SPAWN in after the | 1"
     w, h = map(int, a.size.lower().split("x"))
     things = None if a.no_things else raycast.th.THINGS
     turn = (a.turn_slow, a.turn, a.turn_ramp)
@@ -1212,9 +1230,9 @@ def main():
     data["fsim"] = {"ticks": a.ticks, "doc": f"M4 {w}x{h}", "inserts": inserts}
     gen = HERE / "gen"
     gen.mkdir(exist_ok=True)
-    path = gen / f"game_{w}x{h}.json"
+    path = gen / f"game_{w}x{h}{'' if a.map == maps.DEFAULT else '_' + a.map}.json"
     path.write_text(json.dumps(data, separators=(",", ":")))
-    (gen / f"game_{w}x{h}.txt").write_text(encode(b.to_json()) + "\n")
+    path.with_suffix(".txt").write_text(encode(b.to_json()) + "\n")
     counts = {}
     for e in b.entities:
         counts[e["name"]] = counts.get(e["name"], 0) + 1

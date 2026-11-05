@@ -61,32 +61,17 @@ from compiler import netlist as nl  # noqa: E402
 from compiler.netlist import EACH, GREEN, LANE_SIGNALS, RED, Collect, Graph, Node, Scalar  # noqa: E402
 from sprite import DEFAULT_GAMMA, DEFAULT_SATURATION, c4 as to_c4, grade, nearest, quantize  # noqa: E402
 import hud as hd  # noqa: E402
+import maps  # noqa: E402
 import things as th  # noqa: E402
 import weapons as wp  # noqa: E402
 
-MAP = """
-#######BB#######
-#..............#
-#..MM......MM..#
-#..MM......MM..#
-#..............#
-#......RR......#
-B...B......B...B
-B...B......B...B
-B...B......B...B
-#......RR......#
-#..............#
-#..MM......MM..#
-#..MM......MM..#
-#..............#
-#..............#
-#######BB#######
-""".split()
-TEXTURE_OF = {"#": "STARTAN3", "B": "BRICK7", "M": "MARBLE1", "R": "SP_HOT1"}   # Freedoom (BSD)
+MAP = maps.ARENA["rows"]                 # the current map (maps.select): rows of cells
+TEXTURE_OF = maps.ARENA["walls"]        # wall cell -> Freedoom wall texture (BSD)
+FLATS = maps.ARENA["flats"]             # open cell -> (floor flat, ceiling flat), Freedoom
 TEXTURES = ROOT / "assets" / "freedoom" / "textures.json"
 K = 16                       # grid lines marched per axis (>= map size)
 FP = 256                     # position units per tile
-CENTER = (8 * FP, 7.5 * FP)  # camera path: circle around this point
+CENTER = (maps.ARENA["center"][0] * FP, maps.ARENA["center"][1] * FP)  # camera path: circles this
 RADIUS = int(1.25 * FP)
 PLANE = 676                  # tan(fov/2) * 1024 before View (2026-11-03): about 66 degrees
 HIT = -(1 << 30)
@@ -95,7 +80,6 @@ DEFAULT_FOG = 8.0            # tiles to half brightness (4 looked murky on lamps
 NEG = 4 * len(MAP)           # line base of map keys for rays going - (keys grow with distance)
 COLORS = 14                  # texels 1..14 per texture; 15 marks floor / ceiling
 DEFAULT_TEX = 64             # texture resolution (texels per tile, both ways)
-FLAT_OF = {"floor": "FLOOR4_8", "ceiling": "TLITE6_4"}   # Freedoom flats, one per tile
 FLAT_COLORS = 16             # flat texels 0..15
 DEFAULT_FLAT = 16            # flat resolution (texels per tile, both ways); 0 = untextured
 DEFAULT_ROWS = 6             # screen rows per network: the qualities of a lane signal (Space Age)
@@ -115,7 +99,60 @@ def background(y, h):
 
 
 def is_wall(c):
-    return c != "."
+    return c not in FLATS
+
+
+def flat_names(part):
+    """The flats on the map for part 0 (floor) or 1 (ceiling), in order of first use: index =
+    flat class."""
+    names = []
+    for row in MAP:
+        for c in row:
+            if c in FLATS and FLATS[c][part] not in names:
+                names.append(FLATS[c][part])
+    return names
+
+
+def flat_class(part, x, y):
+    """The flat class of cell (x, y) (0 for walls: a floor point there is a boundary rounding)."""
+    c = MAP[y][x]
+    return flat_names(part).index(FLATS[c][part]) if c in FLATS else 0
+
+
+def flat_rects(part, cls):
+    """Cells of flat class cls as rectangles (x0, x1, y0, y1), inclusive: runs per row, merged
+    down while the next row has the same run."""
+    runs = {}
+    for y, row in enumerate(MAP):
+        x = 0
+        while x < len(row):
+            if row[x] in FLATS and flat_class(part, x, y) == cls:
+                x0 = x
+                while x + 1 < len(row) and row[x + 1] in FLATS and flat_class(part, x + 1, y) == cls:
+                    x += 1
+                runs.setdefault((x0, x), []).append(y)
+            x += 1
+    rects = []
+    for (x0, x1), ys in sorted(runs.items()):
+        start = prev = ys[0]
+        for y in ys[1:] + [None]:
+            if y != prev + 1 if y is not None else True:
+                rects.append((x0, x1, start, prev))
+                start = y
+            prev = y
+    return rects
+
+
+def tile_range(t0, t1, wire, first=None):
+    """Conditions: Each (on wire) is a flat position (2^28 per tile, offset by -8 tiles: signed and
+    increasing) in tiles t0..t1."""
+    lo, hi = (t0 - 8) << 28, (t1 - 7) << 28
+    conds = []
+    if lo > -(1 << 31):
+        conds.append(sem.cond(EACH, ">=", lo, wire, first))
+    if hi < (1 << 31):
+        conds.append(sem.cond(EACH, "<", hi, wire, "and" if conds else first))
+    return conds
 
 
 def wall_types():
@@ -360,19 +397,25 @@ def nibble_range(t, wire=RED, first=None):
 # kept as its position within the tile times 2^32 (int32 products wrap, which drops the tile).
 
 def load_flats(f, shade):
+    """{"floor": [class], "ceiling": [class]}, class = {name, texels[v][u], c4}: per part the
+    map's flats (flat_names), each quantized to FLAT_COLORS colors of its own."""
     if f not in (8, 16, 32):
         raise SystemExit(f"flat resolution {f}: must be 8, 16 or 32 (or 0 for untextured)")
     data = json.loads(TEXTURES.read_text())
     pal = data["palette"]
     out = {}
-    for part, name in FLAT_OF.items():
-        rows, s = data["flats"][name], 64 // f
-        px = [tuple(round(sum(pal[rows[yy][xx]][c] for yy in range(v * s, v * s + s) for xx in range(u * s, u * s + s))
-                          / (s * s)) for c in range(3)) for v in range(f) for u in range(f)]
-        centers = quantize(px, FLAT_COLORS)
-        texels = [[nearest(centers, px[v * f + u]) for u in range(f)] for v in range(f)]
-        c4 = [shade.c4(c) for c in centers]
-        out[part] = {"name": name, "texels": texels, "c4": c4}
+    for pi, part in enumerate(("floor", "ceiling")):
+        out[part] = []
+        for name in flat_names(pi):
+            rows, s = data["flats"][name], 64 // f
+            px = [tuple(round(sum(pal[rows[yy][xx]][c] for yy in range(v * s, v * s + s) for xx in range(u * s, u * s + s))
+                              / (s * s)) for c in range(3)) for v in range(f) for u in range(f)]
+            centers = quantize(px, FLAT_COLORS)
+            texels = [[nearest(centers, px[v * f + u]) for u in range(f)] for v in range(f)]
+            c4 = [shade.c4(c) for c in centers]
+            out[part].append({"name": name, "texels": texels, "c4": c4})
+    if len(out["floor"]) > 8 or len(out["ceiling"]) > 8:
+        raise SystemExit("at most 8 floor and 8 ceiling flats (the class rides in 3 bits)")
     return out
 
 
@@ -452,7 +495,8 @@ def slot_columns(n, hole, x_right=-2):
 
 
 ROLE_GROUPS = [   # a chunk's columns, left to right toward the screen (prefix, ...); k...: its constants
-    ("kky", "fxp", "fyp", "fx", "fy", "w", "fu", "fs", "wd", "tf", "kones", "fpal", "kbr", "lb", "fc", "kbg", "sel"),
+    ("kky", "fxp", "fyp", "fxa", "fya", "fx", "fy", "cl", "cls", "w", "fu", "fs", "wd", "tf", "kones", "fpal", "kbr", "lb",
+     "fc", "kbg", "sel"),
     ("wk",),
     ("kcy", "v", "s", "mux", "e1", "kcsq", "tq", "tp", "tom", "kill", "kcs", "tv", "tnib", "tmux", "tt", "t"),
     ("e2", "pal"),
@@ -786,6 +830,11 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
     dH, kH = march(RAWY, RDY, RDX, PY, PX, 1)
     M0, M1 = tree(dV, "minV"), tree(dH, "minH")
     K0, K1 = tree(kV, "keyV", True), tree(kH, "keyH", True)
+    # Things that yield (extra "back", things.column_stage) cost the thing path a tick, so the walls
+    # wait a tick here, where it takes four delays (after the strips it would take one per strip).
+    back = extra.pop("back", None) if things else None
+    if back:
+        M0, M1, K0, K1 = (g.delay(x, 1) for x in (M0, M1, K0, K1))
     # The last level is split by side: MV holds D on the lanes where a vertical line is nearer, MH
     # on the rest (ties). The constant 2^30 turns HIT + D into D.
     cmp = lambda op: [sem.cond(EACH, op, EACH, RED, None, GREEN)]  # noqa: E731
@@ -802,7 +851,7 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
     t_V = MV.time + 1 + sp   # the chunks' V
     if things:
         col = th.column_stage(g, w, vec, camx, look, tabs, pos0, things, sprites, t_V - sp, shade, hide, frame,
-                              view.plane, extra.pop("thing_pos", None), LS)
+                              view.plane, extra.pop("thing_pos", None), LS, back)
         if aim:
             aim(g, col, [MV, MH], cols[w // 2])
 
@@ -898,10 +947,20 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
     CT6 = {c: bus(CT[c], t_P - 1, f"color{c}") for c in CT}
     if flat:
         fb = flat.bit_length() - 1
-        sums = [g.op("arith", sem.arith_spec(EACH, "+", 0, EACH, RED), red=raw, label=f"raw {a}")
-                for a, raw in (("x", RAWX), ("y", RAWY))]
-        R6 = [bus(n, t_V - 7, f"raw {a}") for n, a in zip(sums, "xy")]
-        Ps = [g.ss(P, "<<", 24, f"frac {a}") for a, P in (("x", PX), ("y", PY))]
+        # Several flats on the map (a flat per tile): the position keeps its tile, 2^28 per tile and
+        # offset by -8 tiles (signed, increasing over the 16 tiles), for a lookup of the tile's flat
+        # class; the texel comes from it shifted left 4 (a tick more, so RAW comes a tick earlier).
+        fmulti = len(flats["floor"]) > 1 or len(flats["ceiling"]) > 1
+        if fmulti:
+            sums = [g.op("arith", sem.arith_spec(EACH, ">>", 4, EACH, RED), red=raw, label=f"raw {a}")
+                    for a, raw in (("x", RAWX), ("y", RAWY))]
+            R6 = [bus(n, t_V - 8, f"raw {a}") for n, a in zip(sums, "xy")]
+            Ps = [g.ss(g.ss(P, "<<", 20, f"tile {a}"), "+", -(1 << 31), f"frac {a}") for a, P in (("x", PX), ("y", PY))]
+        else:
+            sums = [g.op("arith", sem.arith_spec(EACH, "+", 0, EACH, RED), red=raw, label=f"raw {a}")
+                    for a, raw in (("x", RAWX), ("y", RAWY))]
+            R6 = [bus(n, t_V - 7, f"raw {a}") for n, a in zip(sums, "xy")]
+            Ps = [g.ss(P, "<<", 24, f"frac {a}") for a, P in (("x", PX), ("y", PY))]
     if things:
         Dt6 = bus(col["Dt"], t_V - 4, "thing depth")
         M6 = bus(col["masks"], t_V - 2, "thing mask")
@@ -974,26 +1033,73 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
         out = list(pals)
         # The floor or ceiling where V is out of the wall.
         if flat:
-            part = flats["floor" if floor else "ceiling"]
+            pi = 0 if floor else 1
+            classes = flats["floor" if floor else "ceiling"]
             ff = view.flat_factor(1 if floor else -1)
             KY = node["kky"] = cv(ch, lambda x, y: row_scale(y, hv, shade, proj, ff)[0], "k_y")
             FXp, FYp = (g.vv(R, "*", KY, f"f{a}{y0}*") for R, a in zip(R6, "xy"))
-            FX, FY = (g.vs(n, "+", Pa, f"f{a}{y0}") for n, Pa, a in zip((FXp, FYp), Ps, "xy"))
-            node.update({"fxp": FXp, "fyp": FYp, "fx": FX, "fy": FY})
+            FXa, FYa = (g.vs(n, "+", Pa, f"f{a}{y0}") for n, Pa, a in zip((FXp, FYp), Ps, "xy"))
+            node.update({"fxp": FXp, "fyp": FYp})
+            CL = []
+            if fmulti:
+                # FX: the position within the tile times 2^32; FY: times 2^28, plus the tile's flat
+                # class << 28 (one decider per class but the first: 2D ranges, x on red, y on green).
+                FX, FY = g.vc(FXa, "<<", 4, f"fx{y0}"), g.vc(FYa, "AND", (1 << 28) - 1, f"fy{y0}")
+                for c in range(1, len(classes)):
+                    conds = []
+                    for x0, x1, ya, yb in flat_rects(pi, c):
+                        rc = tile_range(x0, x1, RED) + tile_range(ya, yb, GREEN, "and")
+                        rc[0] = dict(rc[0])
+                        rc[0].pop("compare_type", None)
+                        if conds:
+                            rc[0]["compare_type"] = "or"
+                        conds += rc
+                    CL.append(g.decider(conds, [sem.out(EACH, constant=c << 28)], red=FXa, green=FYa,
+                                        label=f"flat class{y0}.{c}"))
+                    node[f"cl{c}"] = CL[-1]
+                node.update({"fxa": FXa, "fya": FYa})
+            else:
+                FX, FY = FXa, FYa
+            node.update({"fx": FX, "fy": FY})
             ws = []
-            for v in range(flat):
-                for j in range(flat // 8):
-                    word = flat_word(part["texels"], v, j)
-                    if word:
-                        conds = (top_range(j, fb - 3, RED) if fb > 3 else []) + top_range(v, fb, GREEN, "and" if fb > 3 else None)
-                        ws.append(g.decider(conds, [sem.out(EACH, constant=word)], red=FX, green=FY, label=f"flat{y0}.{v}.{j}"))
-                        node[f"w{v}.{j}"] = ws[-1]
+            for cls, part in enumerate(classes):
+                for v in range(flat):
+                    for j in range(flat // 8):
+                        word = flat_word(part["texels"], v, j)
+                        if not word:
+                            continue
+                        jc = top_range(j, fb - 3, RED) if fb > 3 else []
+                        if fmulti:
+                            lo = (cls << 28) + (v << (28 - fb))
+                            vc_ = [sem.cond(EACH, ">=", lo, GREEN, "and" if jc else None),
+                                   sem.cond(EACH, "<", lo + (1 << (28 - fb)), GREEN, "and")]
+                            if lo + (1 << (28 - fb)) >= 1 << 31:
+                                vc_ = vc_[:1]
+                            key = f"w{cls}.{v}.{j}" if len(classes) > 1 else f"w{v}.{j}"
+                        else:
+                            vc_ = top_range(v, fb, GREEN, "and" if jc else None)
+                            key = f"w{v}.{j}"
+                        ws.append(g.decider(jc + vc_, [sem.out(EACH, constant=word)], red=FX, green=[FY] + CL if CL else FY,
+                                            label=f"flat{y0}.{key[1:]}"))
+                        node[key] = ws[-1]
             sf = g.vc(g.vc(FX, ">>", 30 - fb, f"fu{y0}"), "AND", 28, f"fs{y0}")
             wd = g.op("arith", sem.arith_spec(EACH, "+", 0, EACH, RED), red=ws, label=f"fword{y0}")
             Tf = g.vv(wd, "<<", sf, f"ftexel{y0}")
             ones = node["kones"] = cv(ch, lambda x, y: 1, "ones")
-            fci = [g.decider(nib(c) + [sem.cond(EACH, "!=", 0, GREEN, "and")], [sem.out(EACH, constant=pack(c4) or 1)],
-                             red=Tf, green=ones, label=f"fpal{y0}.{c}") for c, c4 in enumerate(part["c4"])]
+            if len(classes) > 1:
+                # Per class its colors: the class rides on the green input beside the ones (1 + class << 28).
+                CLS = g.op("arith", sem.arith_spec(EACH, "+", 0, EACH, RED), red=CL, label=f"flat classes{y0}")
+                node["cls"] = CLS
+                fci = []
+                for cls, part in enumerate(classes):
+                    for c, c4 in enumerate(part["c4"]):
+                        fci.append(g.decider(nib(c) + [sem.cond(EACH, "=", 1 + (cls << 28), GREEN, "and")],
+                                             [sem.out(EACH, constant=pack(c4) or 1)], red=Tf, green=[ones, at(CLS, Tf.time)],
+                                             label=f"fpal{y0}.{cls}.{c}"))
+                        node[f"fpal{cls}.{c}"] = fci[-1]
+            else:
+                fci = [g.decider(nib(c) + [sem.cond(EACH, "!=", 0, GREEN, "and")], [sem.out(EACH, constant=pack(c4) or 1)],
+                                 red=Tf, green=ones, label=f"fpal{y0}.{c}") for c, c4 in enumerate(classes[0]["c4"])]
             kbr = lambda x, y, k=0: max(1, row_scale(y, hv, shade, proj, ff, k)[1])  # noqa: E731
             node["kbr"] = cv(ch, kbr, "flat brightness")
             # The muzzle light: per level a decider adds the brightness gained on that row.
@@ -1007,7 +1113,9 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
                                     red=[at(LK.node, tf - 1)], time=tf, label=f"flat light{y0}.{lk}"))
             node.update({f"lb{i}": d for i, d in enumerate(lbs)})
             FC = g.vv(fci, "*", [node["kbr"]] + lbs, f"flat{y0}")
-            node.update({"fu": sf.red[0], "fs": sf, "wd": wd, "tf": Tf, "fc": FC, **{f"fpal{c}": d for c, d in enumerate(fci)}})
+            node.update({"fu": sf.red[0], "fs": sf, "wd": wd, "tf": Tf, "fc": FC})
+            if len(classes) == 1:
+                node.update({f"fpal{c}": d for c, d in enumerate(fci)})
         else:
             FC = node["kbg"] = cv(ch, lambda x, y: pack(background(y, hv)), "background")
         sel = g.decider(out_of_wall, [sem.out(EACH, networks=GREEN)], red=Vk, green=FC, label=f"flat select{y0}")
@@ -1200,7 +1308,8 @@ def ideal(g, scal, layout, w, h, T):
                 d = view.flat_factor(r) * proj / abs(r)
                 fx, fy = px + d * rdx, py + d * rdy
                 u, v = int((fx - math.floor(fx)) * f), int((fy - math.floor(fy)) * f)
-                part = flats["floor" if r > 0 else "ceiling"]
+                tx, ty = min(15, max(0, int(fx))), min(15, max(0, int(fy)))
+                part = flats["floor" if r > 0 else "ceiling"][flat_class(0 if r > 0 else 1, tx, ty)]
                 img[y][c] = flat_color(part["c4"][part["texels"][v][u]],
                                        row_scale(y, hv, layout["shade"], proj, view.flat_factor(r))[1])
         mx, my = int(px), int(py)
@@ -1247,7 +1356,7 @@ def read_ppm(path):
 
 
 def verify(path, g, cols, rows, scal, layout, w, h, ticks, lattice, every=5):
-    out_dir = ROOT / "out" / f"raycast_{w}x{h}_ppm"
+    out_dir = ROOT / "out" / f"raycast_{w}x{h}{maps.suffix()}_ppm"
     out_dir.mkdir(parents=True, exist_ok=True)
     for f in out_dir.glob("*.ppm"):
         f.unlink()
@@ -1310,7 +1419,9 @@ def main():
     quality_arg(ap)
     shading_args(ap)
     view_args(ap)
+    maps.map_arg(ap)
     a = ap.parse_args()
+    maps.select(a.map)
     w, h = map(int, a.size.lower().split("x"))
     g, b, cols, rows, scal, layout = build(w, h, a.substation_quality, a.tex, a.flat, None if a.no_things else th.THINGS,
                                            Shading.from_args(a), None if a.no_hud else scripted_hud,
@@ -1319,9 +1430,9 @@ def main():
     data["fsim"] = {"ticks": a.ticks, "doc": f"raycaster M3 {w}x{h}"}
     gen = HERE / "gen"
     gen.mkdir(exist_ok=True)
-    path = gen / f"raycast_{w}x{h}.json"
+    path = gen / f"raycast_{w}x{h}{'' if a.map == maps.DEFAULT else '_' + a.map}.json"
     path.write_text(json.dumps(data, separators=(",", ":")))
-    (gen / f"raycast_{w}x{h}.txt").write_text(encode(b.to_json()) + "\n")
+    path.with_suffix(".txt").write_text(encode(b.to_json()) + "\n")
     n_comb = sum(1 for e in b.entities if "combinator" in e["name"] and e["name"] != "constant-combinator")
     n_lamp = sum(1 for e in b.entities if e["name"] == "small-lamp")
     print(f"{path.relative_to(ROOT)}: {len(b.entities)} entities ({n_comb} combinators, {n_lamp} lamps, {g.relays} relay poles)")

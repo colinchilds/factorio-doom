@@ -184,6 +184,17 @@ Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► sp
      depth; `Dt = alpha * 64 + frame` gives the precise depth and the frame. They can disagree
      only when two things are within 1/256 tile of each other. One thing per column: a farther
      thing is hidden by the nearer one's box columns, even where it is transparent.
+   - **Live monsters first (2026-11-04, user report: monsters behind a corpse were invisible):**
+     with the `back` hook (game.py: items always, a monster while dying or dead) a yielding
+     thing's leaves carry 2^30 more on Zt and 2^29 more on Dt (`YIELD_D`), so it loses the trees
+     wherever its box overlaps a live monster's; Dt drops it after the trees (an AND), Zt's goes
+     with SK's AND. Only in front of NEAR (a decider per monster on its alpha and flag, the bias on
+     dc's wire and on every column of the Dt leaf's green input; items as constant outputs), so
+     one behind the camera still fails NEAR. The live monster is drawn whole; the corpse is cut
+     where the live box covers it (the full fix, two layers per column, would double the thing
+     path and its lookups). The AND costs the thing path a tick, so the walls wait a tick after
+     their min trees (four delays: waiting after the strips took one per strip, 4,096, and broke
+     the layout): the game's raycaster is 18 ticks. raycast.py alone (no hook) is unchanged.
    - **Lookups per (frame, u):** a mask word (bit 31 − t: row t opaque) and 4 texel words, keyed
      by `SK = Zt AND (2^KB - 1)` (ranges) and `FR = Dt AND 63`. They sit in the strip block after
      the wall strips.
@@ -479,7 +490,8 @@ Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► sp
       (Doom keeps a chase direction for a while). No monster-monster collision yet.
     - **Attacks:** after a full walk cycle (after waking, an attack or a flinch), an attempt at each
       of Doom's A_Chase ticks while in sight, with Doom's chance by distance band
-      (P_CheckMissileRange). The attack frames, then at the shot frame, if still in sight: the
+      (P_CheckMissileRange), and none beyond 5 tiles (the last band; user request 2026-11-04:
+      monsters hit from across the acid map's hall the moment the game started). The attack frames, then at the shot frame, if still in sight: the
       zombieman hits by Doom's spread (64% within a tile down to 10% far off) for 9, the imp
       scratches within a tile (always) or throws a fireball (half hit: no projectiles yet) for 12.
       Random numbers: an LCG on M (the arith reads its constant on red, M on green) times a
@@ -638,6 +650,50 @@ Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► sp
       320×200 with the song: 12,500 combinators (+25), 79,108 entities, 1.07 ms per tick in Space
       Age, fully powered.
     - **Not checked:** the sound itself (the harness records combinators, not speakers).
+
+20. **Maps and floors per tile (`demos/maps.py`, 2026-11-04, user request: the launch video's
+    showcase, see "Next steps"):**
+    - **Maps:** `--map` on raycast.py and game.py picks one: `arena` (the default, every check was
+      tuned on it; its blueprints are byte-identical to before) or `acid` (a start room, a wooden
+      tunnel north into a hall over acid with a brown walkway zigzagging across it to an exit
+      corridor; our layout, Freedoom's textures). A map holds its cells (wall characters to wall
+      textures, open characters to a floor and a ceiling flat), things, monster facings, spawn,
+      spawn angle and the scripted camera's center. `maps.select` makes one current in every
+      module (patching raycast also when it runs as `__main__`). Maps are 16 x 16.
+    - **Floors per tile:** with more than one flat on the map, the flat position keeps its tile:
+      `(RAW >> 4) * K_y + ((P << 20) - 2^31)` is the world position times 2^28, offset by -8 tiles
+      so it is signed and increasing over the map, and its top 4 bits are the tile. Per chunk:
+      `FX = that << 4` (the old position within the tile, times 2^32), `FY = that AND (2^28 - 1)`,
+      and per flat class but the first a decider over the class's tile rectangles (`flat_rects`; x
+      ranges on red, y on green: `tile_range`) outputting `class << 28` onto FY's wire. The word
+      deciders then test one range on FY: class, then the flat row. Each class has its own 16
+      colors: its palette deciders test the class on green (`1 + class << 28`, the ones vector plus
+      the class sum delayed). One tick more on the flat path, which starts a tick earlier: no
+      latency. Up to 8 flats per part.
+    - **The acid map's monsters (2026-11-04, user request: they saw the player from the start and
+      hurt from across the hall):** out of sight of the start room and the tunnel: either side of
+      the tunnel's mouth facing the walkway (an ambush), the far walkway (it sees the mouth from 7
+      tiles, beyond the new 5-tile attack range) and around the exit corridor's corner.
+    - **The acid map's flats:** FLOOR4_8 (grey hex: start room, tunnel), FLOOR5_2 (the brown
+      walkway), NUKAGE1 (acid; not animated, no damage: user decision), one ceiling (CEIL5_1) for
+      now: the tunnel's low ceiling comes with ceiling heights. Walls STARTAN3, WOOD1, TEKGREN2,
+      BROWNGRN (exported into `assets/freedoom/textures.json` with the flats).
+    - **Cost (acid vs arena):** 9,243 / 10,909 / 13,941 combinators at 64×40 / 160×100 / 320×200
+      (+311 / +731 / +1,466; a second ceiling flat added about 730 more at 320×200). 320×200: 80,760
+      entities, 1.14 ms per tick in Space Age (1.07 for the arena), fully powered.
+    - **Checks:** the arena's blueprints are byte-identical (raycast 64×40, game 64×40, raycast
+      160×100 with `--flat 0`). On the acid map: raycast `--verify` 0 differ at 64×40, 160×100
+      and 320×200 (the float reference differs on 8.5 / 9.2 / 11.1% of view pixels, the arena's
+      7-9%: flat texels and tiles at boundaries round either way); game `--verify` 0 differ at
+      64×40 and 160×100 (the arena's script on the acid map: every monster wakes, chases and kills
+      the player, both restarts).
+    - **After the monster and corpse fixes (2026-11-04):** game `--verify` 0 differ on both maps at
+      64×40 and 160×100 (raycaster latency 18; on the acid map the walk still wakes all four and
+      dies, 19 attacks). Combinators: arena 8,976 / 10,222, acid 9,287 / 10,953 at 64×40 /
+      160×100; acid 320×200 with the music 14,010, 1.20 ms per tick in Space Age, fully powered.
+      A staged scene (an imp behind a zombieman's corpse) shows the imp whole. Each map now writes
+      its frames to its own folder (`maps.suffix`): two maps verified at once shared one, and the
+      arena's frames came out wrong.
 
 Still to come (M4): doors; see "Next steps".
 
@@ -1030,13 +1086,13 @@ right, then the player logic below the pad.
   - 160×100 imports in Space Age, fully powered, at 0.87 ms per tick with things (0.78 without;
     without flats 0.59; M2 0.40). 320×200: 1.75 ms with things (1.40 without, 1.16 without
     flats, M2 0.88). Blueprint strings 1.0 and 2.6 MB.
-- **Input-to-screen latency:** about 22 ticks (0.37 s) for both turning and walking: pad 3,
-  gate or turn decider into REG 2, raycaster 17 with the lamps (18 before the angle wrap, item
-  12). Firing: pad 3, relay 1, the animation's start 1, then the raycaster.
+- **Input-to-screen latency:** about 23 ticks (0.38 s) for both turning and walking: pad 3,
+  gate or turn decider into REG 2, raycaster 18 with the lamps (17 before live monsters drew in
+  front of corpses, item 7; 18 before the angle wrap, item 12). Firing: pad 3, relay 1, the animation's start 1, then the raycaster.
   - **History:** about 56 ticks at first (the user felt "almost a full second"), then 27 for
     turning and 35 for walking, then 21 (M2, flat walls), then this.
-  - **The raycaster's 17:** camera lookups 1, ray products 1, ray shift / sign selectors 1, key
-    product 1, key division 1, hit lookup 1, min trees 4, side split 1, strip lookups 1, quality
+  - **The raycaster's 18:** camera lookups 1, ray products 1, ray shift / sign selectors 1, key
+    product 1, key division 1, hit lookup 1, min trees 4, the things' tick (item 7) 1, side split 1, strip lookups 1, quality
     spread (and V's spread) 1, V 1, mux 1, shift 1, palette 1, lamps 1.
 - **Further cuts if we want them (not done; option B, discussed 2026-11-01):**
   - **Angle ROM:** everything that depends only on view angle and column (ray components, the
@@ -1087,6 +1143,7 @@ Done:
 - Face expressions (architecture item 17): glances, turning toward an attacker, rampage.
 - Weapon keys and reset (architecture item 18): number buttons and keys pick weapons; reset any time.
 - Music (architecture item 19): a MIDItorio song on a loop, starting over on a new game.
+- Maps and floors per tile (architecture item 20): the acid showcase map, step 1.
 - Chunks, layout and latency (architecture item 12): six rows per network on signal qualities
   (Space Age), about half the combinators, layout by concept, the bus on a substation row, 17-tick
   raycaster.
@@ -1095,6 +1152,23 @@ Commit only when the user asks.
 
 ## Next steps (in order)
 
+0. **The launch video's showcase (user request, 2026-11-04):** the feel of a classic first level's
+   acid room, not a copy of it: a low tunnel opening into a tall hall, a brown walkway zigzagging
+   over acid, shotgun guys. Scope the user set: the floor stays at one height (the acid is a
+   different flat at the same level, no damage), no up and down, no secret area.
+   1. Floors per tile and the map: done (architecture item 20).
+   2. Two ceiling heights, the eye fixed: tall walls in the hall, the low tunnel (and start room).
+      Design: with a flat floor and a fixed eye only entering a low region matters, and a ray
+      enters a rectangle once. So per low region (a rectangle) a min tree gives the column's entry
+      and exit distances E, X (lookups on the march's crossings like the wall hits); per pixel in
+      the upper half a few comparisons with the row's constants decide: the hall's ceiling, the
+      wall above the opening (at E, its own texture lookups), the tunnel's ceiling (its own flat
+      distance) or the walls behind, cut by the tunnel's ceiling edge. Tall walls repeat their
+      texture (more mux ranges). Estimate 2-3k combinators at 320×200, 1-2 ticks; prototype in
+      raycast.py first.
+   3. Shotgun guys: Freedoom's shotgun zombie (SPOS) frames, the zombieman's logic with 3 pellets,
+      about 30 health, a shotgun drop. Maybe 6 monsters and 2 items (8 things).
+   4. Tune the map and a camera path for the video.
 1. **M4, the rest:** things are drawn (item 7), can be shot (item 11) and move and attack (item
    15); next are doors.
    - Monster follow-ups: imp fireballs as projectiles (things that move; two more things need a
@@ -1117,7 +1191,8 @@ Commit only when the user asks.
      the brightness (as the muzzle light) plus a red broadcast per chunk; the weapon's and the
      bar's colors are exact constants, so they need another way.
    - Thing follow-ups: more than 8 things (a fourth tree level costs a tick, or sort by depth on
-     scalars); a second nearest layer so overlapping things don't cut each other.
+     scalars); a second nearest layer so overlapping things don't cut each other (live monsters
+     already win over corpses and items, item 7; two monsters still cut each other).
 2. **M6: audio (planned 2026-11-02, user request).** Music on a loop and sound effects, with
    vanilla programmable speakers driven by the circuit.
    - **Music:** done (architecture item 19), for any MIDItorio song the player supplies. A song
@@ -1140,8 +1215,7 @@ Commit only when the user asks.
      - whether the instrument can come from the circuit, or needs one speaker per instrument;
      - UPS for a few hundred speakers.
 3. **Possible M3 follow-ups:** fix the mirrored faces; fewer strip deciders (4,096 of the
-   ~13,000 combinators at 160×100); different flats per room (needs the map cell per pixel, which
-   the wrapping product throws away); a lower-cost flat path (the 32 word deciders per row are
+   ~13,000 combinators at 160×100); different flats per room (done: item 20); a lower-cost flat path (the 32 word deciders per row are
    most of it).
 4. **Tooling as needed:** fsim speed for 320×200 work (about 70 ms per tick for the textured
    game without flats; lookups are about 100× slower than the game).
