@@ -653,8 +653,10 @@ Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► sp
 
 20. **Maps and floors per tile (`demos/maps.py`, 2026-11-04, user request: the launch video's
     showcase, see "Next steps"):**
-    - **Maps:** `--map` on raycast.py and game.py picks one: `arena` (the default, every check was
-      tuned on it; its blueprints are byte-identical to before) or `acid` (a start room, a wooden
+    - **Maps:** `--map` on raycast.py and game.py picks one: `arena` (the default; its monsters
+      moved 5-9 tiles from the spawn on 2026-11-04, user request), `test` (the arena with the
+      monsters where game.py's scripted walk and fight were tuned: verify game.py with `--map
+      test` for the full fight, death and restarts) or `acid` (a start room, a wooden
       tunnel north into a hall over acid with a brown walkway zigzagging across it to an exit
       corridor; our layout, Freedoom's textures). A map holds its cells (wall characters to wall
       textures, open characters to a floor and a ceiling flat), things, monster facings, spawn,

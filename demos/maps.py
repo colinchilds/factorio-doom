@@ -5,7 +5,9 @@ A map is 16 x 16 cells (raycast.K grid lines per axis; the flats' tile lookup ke
 axis). A cell is a wall (a key of `walls`: its texture) or open (a key of `flats`: its floor and
 ceiling flats). Open cells must be closed in by walls.
 
-  arena   the test map (M1-M4): pillars and a central block, every scripted check was tuned on it.
+  arena   the first map (M1-M4): pillars and a central block.
+  test    the arena with its monsters where they stood until 2026-11-04 (two of them a few tiles from
+          the spawn): game.py's scripted walk and fight were tuned on it, so verify with --map test.
   acid    the showcase (2026-11-04, user request): a start room, a wooden tunnel north into a hall
           over acid, a brown walkway zigzagging across it to an exit corridor. Inspired by a classic
           first level's nukage room, laid out our own way on the grid.
@@ -34,11 +36,13 @@ B...B......B...B
     "walls": {"#": "STARTAN3", "B": "BRICK7", "M": "MARBLE1", "R": "SP_HOT1"},
     "flats": {".": ("FLOOR4_8", "TLITE6_4")},
     # (x, y) in tiles and the sprite frame: monsters first, then items (things.py).
+    # Monsters 5 to 9 tiles from the spawn (user request 2026-11-04: two stood 2-3 tiles off), the
+    # side ones behind the brick pillars.
     "things": [
         (5.5, 4.5, "TROOA1"),
         (10.5, 7.5, "POSSA1"),
-        (10.1, 10.9, "TROOA1"),
-        (5.2, 12.7, "POSSA1"),
+        (13.5, 7.5, "TROOA1"),
+        (2.5, 7.5, "POSSA1"),
         (5.6, 13.5, "AMMOA0"),
         (4.45, 14.65, "MEDIA0"),
         (7.4, 13.35, "ARM1A0"),
@@ -93,7 +97,10 @@ NNNNNNW..WNNNNNN
     "center": (8, 7),
 }
 
-MAPS = {"arena": ARENA, "acid": ACID}
+TEST = dict(ARENA, things=[(5.5, 4.5, "TROOA1"), (10.5, 7.5, "POSSA1"), (10.1, 10.9, "TROOA1"), (5.2, 12.7, "POSSA1")]
+            + ARENA["things"][4:])
+
+MAPS = {"arena": ARENA, "test": TEST, "acid": ACID}
 DEFAULT = "arena"
 current = ARENA
 
