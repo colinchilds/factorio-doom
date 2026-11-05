@@ -37,7 +37,9 @@ The tools so far:
   nearest live monster in the middle of the view (`demos/combat.py`), which flinches with its
   pain frame and dies with Freedoom's death animation, leaving a corpse. At 0 health you're dead
   (frozen, gun lowered); press Use to start a new game. The pad's reset button, set apart to the
-  right of the D-pad, starts a new game at any time.
+  right of the D-pad, starts a new game at any time. Optional music (`demos/music.py`): any song
+  converted by [MIDItorio](https://miditorio.com), on programmable speakers, looping, and starting
+  over with each new game.
 - **Demos** (`demos/`): `gradient.py` builds a 16×16 lamp screen laid out like the planned
   renderer's row stage. fsim and the game agree on it lamp for lamp.
 
@@ -109,6 +111,19 @@ python3 harness/run.py --lanes                    # refresh conformance/lane_sig
 python3 harness/run.py --poles                    # refresh conformance/pole_quality.json (DLC)
 python3 harness/run.py --signals                  # refresh conformance/signal_order.json
 python3 harness/run.py --discover                 # export a blueprint with every option set
+```
+
+### Music (optional)
+
+Convert a MIDI file with [MIDItorio](https://miditorio.com), save the blueprint string to a file,
+and pass it to the game. The song loops at its end and starts over on a new game (Use after dying,
+or reset). Its constant combinator (the label) switches the music off and on. Songs stay out of
+the repository (`music/` is ignored): only original or freely licensed content goes in.
+
+```sh
+python3 demos/game.py --size 160x100 --music music/song.txt       # the game with the song
+python3 demos/music.py music/song.txt --verify                    # the song alone, every speaker decider checked
+python3 demos/music.py music/song.txt --loop 300 --ticks 1700     # a short loop, for a game run (harness --dlc)
 ```
 
 ### Keyboard input (optional mod)

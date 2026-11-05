@@ -38,6 +38,9 @@ around a pole below the turn deciders: their deciders read the bus on red and M 
 status bar face's expression (face.py) is on the bus too, its counters on M, and the raycaster puts
 each monster's bearing (left, right or ahead) on the bus next to the aim.
 
+Music (music.py, optional: `--music FILE`, a MIDItorio blueprint of the player's): the song's
+clock reads RESTART on the bus, so a new game starts it over, and it loops at the song's end.
+
 The raycaster (demos/raycast.py build_graph) takes its camera from the bus through a relay line
 over the top of the screen to a pole left of it (its ext input). The status bar (demos/hud.py)
 reads the same port, adding hud.START on the wire, and the weapon picture comes from W and A.
@@ -66,6 +69,7 @@ import face as fc  # noqa: E402
 import hud as hd  # noqa: E402
 import input_pad  # noqa: E402
 import monsters as mo  # noqa: E402
+import music  # noqa: E402
 import raycast  # noqa: E402
 import touch as tc  # noqa: E402
 import weapons as wp  # noqa: E402
@@ -327,6 +331,42 @@ def dead_flag(b, x, y):
     return b.decider(x, y, dead_terms(), [sem.out(DEAD, constant=1)], direction=4)
 
 
+def place_music(b, song, bus, bus_pos, w, lattice):
+    """The song (music.py) in the free spot nearest the bus entity `bus` (a 2x1 decider reading the
+    bus on red, at bus_pos), right of the screen and clear of everything by a tile, its clock's red
+    input wired to the bus (through relay poles if needed). Returns {song entity: entity}."""
+    taken = b.occupied()
+    xs = [x for x, _ in taken if x >= w]
+    ys = [y for x, y in taken if x >= w]
+    x0, x1, y0, y1 = w + 2, max(xs) + song.w + 4, min(ys), max(ys) + song.h + 4
+    bw, bh = song.w + 2, song.h + 2   # the song and a tile around it
+    # Summed-area table of blocked tiles.
+    nx, ny = x1 - x0 + 1, y1 - y0 + 1
+    sat = [[0] * (nx + 1) for _ in range(ny + 1)]
+    for j in range(ny):
+        row = 0
+        for i in range(nx):
+            row += (x0 + i, y0 + j) in taken or lattice(x0 + i, y0 + j)
+            sat[j + 1][i + 1] = sat[j][i + 1] + row
+    best = None
+    for j in range(ny - bh + 1):
+        for i in range(nx - bw + 1):
+            if sat[j + bh][i + bw] - sat[j][i + bw] - sat[j + bh][i] + sat[j][i]:
+                continue
+            d = (x0 + i + bw / 2 - bus_pos[0]) ** 2 + (y0 + j + bh / 2 - bus_pos[1]) ** 2
+            if best is None or d < best[0]:
+                best = (d, x0 + i + 1, y0 + j + 1)
+    _, x, y = best
+    ids = song.place(b, x, y, RESTART)
+    clock = b.entities[ids[song.clock] - 1]
+    cw, ch = music.size(clock)
+    cx, cy = clock["position"]["x"] - cw / 2, clock["position"]["y"] - ch / 2
+    netlist._relay(b, (cx, cy, cx + cw, cy + ch), (ids[song.clock], RED_IN),
+                   (bus_pos[0], bus_pos[1], bus_pos[0] + 2, bus_pos[1] + 1), (bus, RED_IN), 1,
+                   lambda x, y: not lattice(x, y), b.occupied())
+    return {"song": song, "ids": ids}
+
+
 def angle_wrap(b, x, y):
     """Two deciders keeping R within a turn: R >= TURN -> -TURN into REG, R < 0 -> +TURN. They read
     the bus (REG) on red and their own outputs on green, so a correction counts the tick it is on
@@ -466,7 +506,7 @@ def weapon_from_port(g, extra):
 
 def build(w, h, n=None, hold=input_pad.DEFAULT_HOLD, substation_quality=DEFAULT_SUBSTATION_QUALITY,
           tex=raycast.DEFAULT_TEX, flat=raycast.DEFAULT_FLAT, things=raycast.th.THINGS, turn=DEFAULT_TURN,
-          shade=None, hud=True, weapon=True, rows=raycast.DEFAULT_ROWS, view=None):
+          shade=None, hud=True, weapon=True, rows=raycast.DEFAULT_ROWS, view=None, song=None):
     n = n or input_pad.button_size(h)
     b = Blueprint(f"Factorio Doom M4 {w}x{h}", substation_quality)
     lattice = b.grid.hole
@@ -573,6 +613,8 @@ def build(w, h, n=None, hold=input_pad.DEFAULT_HOLD, substation_quality=DEFAULT_
     netlist._relay(b, reg_fp, (reg, RED_OUT), sub_fp, (subs[-1], 1), 1, lambda x, y: not lattice(x, y), b.occupied(),
               c_pole=True)
 
+    if song:
+        nodes["music"] = place_music(b, song, dead, (reg_pos[0], reg_pos[1] + 6), w, lattice)
     raycast._substations(b)
     b.power()
     b.link_power()
@@ -800,15 +842,22 @@ def verify(path, b, pad, g, nodes, gr, cols, rows, layout, w, h, inserts, ticks,
         f.unlink()
     M = nodes.get("M")
     mnet_args = ["--net", f"{M.spec['entity']}:2"] if M else []
+    mus = nodes.get("music")
+    clock_id = mus["ids"][mus["song"].clock] if mus else None
+    if mus:
+        mnet_args += ["--probe", str(clock_id)]
     res = subprocess.run([str(ROOT / "target" / "release" / "fsim"), "run", str(path), "--ticks", str(ticks),
                           "--input", str(ins_path), "--probe", str(reg), "--net", f"{reg}:{RED_OUT}"] + mnet_args
                          + ["--ppm", str(out_dir)],
                          check=True, capture_output=True, text=True)
-    got, got_bus, got_m = {}, {}, {}
+    got, got_bus, got_m, got_clock = {}, {}, {}, {}
     for line in res.stdout.splitlines():
         if not line.startswith("t="):
             continue
         t = int(line.split()[0][2:])
+        if mus and line.split()[1] == f"#{clock_id}":
+            got_clock[t] = sum(int(kv.split("=")[1]) for kv in line.split(": ", 1)[1].split()) if ": " in line else 0
+            continue
         vals = dict(kv.split("=") for kv in line.split(": ", 1)[1].split()) if ": " in line.strip() else {}
         d = {sem.key(sig(f"signal-{k[-1]}" if not k.startswith("signal-") and len(k) == 1 else k)): int(v)
              for k, v in vals.items()}
@@ -978,6 +1027,18 @@ def verify(path, b, pad, g, nodes, gr, cols, rows, layout, w, h, inserts, ticks,
               and any(ref[t][sem.key(s)] != ref[t - 1][sem.key(s)] for s in (SX, SY, SR))]
     rule_bad += frozen
     print(f"death: dead on {dead_ticks} ticks, moved while dead on {len(frozen)} {frozen[:3]}; restarts at {restarts}")
+    # Music: the clock counts, loops at the song's end, and drops to 0 when its network (the bus)
+    # shows RESTART (the outputs of the tick before).
+    if mus:
+        song, prev, clock_bad, zeros = mus["song"], 0, [], []
+        for t in range(ticks):
+            prev = music.clock_rule(prev, t > 0 and ref_bus[t - 1].get(ZK, 0), True, song.length)
+            if got_clock.get(t, 0) != prev:
+                clock_bad.append((t, got_clock.get(t), prev))
+            if prev == 0:
+                zeros.append(t)
+        rule_bad += clock_bad
+        print(f"music: clock {len(clock_bad)} ticks differ {clock_bad[:3]}; started over at {zeros}")
     # The aim against the float hitscan (combat.ideal_aim) from the bus tau ticks earlier; near-ties
     # (within NEAR_TIE tiles of a boundary) may round either way.
     aim_bad, aim_near = [], 0
@@ -1133,6 +1194,8 @@ def main():
                     help=f"turn speed once held a while: 1/{1 << ANGLE_SUB} view angles (1/{256 << ANGLE_SUB} turn) per tick")
     ap.add_argument("--turn-slow", type=int, default=DEFAULT_TURN[0], help="turn speed while a button is first held")
     ap.add_argument("--turn-ramp", type=int, default=DEFAULT_TURN[2], help="ticks held before turning speeds up")
+    ap.add_argument("--music", help="a MIDItorio blueprint string (file): the song loops, and starts over on a "
+                                    "new game (music.py)")
     quality_arg(ap)
     raycast.shading_args(ap)
     raycast.view_args(ap)
@@ -1142,7 +1205,8 @@ def main():
     turn = (a.turn_slow, a.turn, a.turn_ramp)
     b, pad, g, nodes, gr, cols, rows, scal, layout, lat, probe = build(
         w, h, a.button_size, a.hold, a.substation_quality, a.tex, a.flat, things,
-        turn, raycast.Shading.from_args(a), not a.no_hud, not a.no_weapon, view=raycast.View.from_args(a))
+        turn, raycast.Shading.from_args(a), not a.no_hud, not a.no_weapon, view=raycast.View.from_args(a),
+        song=music.Song(pathlib.Path(a.music).read_text()) if a.music else None)
     inserts = schedule(pad, a.ticks, keys=a.keys)
     data = b.to_json()
     data["fsim"] = {"ticks": a.ticks, "doc": f"M4 {w}x{h}", "inserts": inserts}

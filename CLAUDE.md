@@ -607,6 +607,38 @@ Game state (scalars) ─► ray vectors ─► march: K steps per axis ─► sp
       The 64×40 game matches a Space Age game on 14,723,814 checks (2,560 ticks, `--dlc --warmup 60
       --every 2`). 320×200: 79,060 entities, 1.07 ms per tick in Space Age, fully powered.
 
+19. **Music (`demos/music.py`, 2026-11-04, user request):** a song converted by
+    [MIDItorio](https://miditorio.com) (version 2.2.1 tested) loops on programmable speakers and
+    starts over on a new game. `game.py --music FILE` takes the blueprint string from a file of the
+    player's; it is optional, and without it the blueprint is unchanged.
+    - **What MIDItorio emits:** the song in two constant combinators (per lane, at six qualities: a
+      time, and up to two events of an 8-bit instrument address and a 6-bit note), a clock (a red
+      self-loop plus 1 from a constant, its on switch: it counts forever, so the song plays once),
+      a decider passing the lanes whose time is now (`Each(red) = signal-green`), four arithmetic
+      combinators unpacking the events, and per channel a decider (`Each(red) = address` -> the
+      speaker signal, copying the matching lane's note from green: a named output under an Each
+      condition, `decider_each`) driving a speaker (pitch from the value, global playback). The
+      user's first song: 1,544 lanes, 19 speakers, 96 s, 15×6 tiles.
+    - **The clock, rewired (`Song.place`):** a counter on a green loop (its own count, plus 1 from
+      the constant) while the count is at most the song's length (the last event's time: it then
+      drops to 0, so the song loops), `RESTART = 0` on its red input (the state bus: a new game,
+      either way, starts it over) and `signal-check` > 0 from the constant (the on switch: off stops
+      the music, on starts it from the top). Everything else is the song's own. Nothing on the bus
+      changes; the clock only reads it.
+    - **Placement (`game.place_music`):** the free spot nearest the dead flag (a bus reader), right
+      of the screen, clear by a tile; its clock's red input is relayed to the dead flag's.
+    - **Content:** songs stay out of the repository (`music/` is gitignored). The user's first song
+      is id Software's E1M1 ("At Doom's Gate"), which the project's freely-licensed rule keeps out.
+    - **Checks:** `music.py FILE --verify` builds the song with a stand-in bus (a scripted constant:
+      two restarts, the switch off and on) and checks the clock and every speaker decider, every
+      tick, against the song's events (`Song.expected`, decoding the lanes through the song's own
+      arithmetic): 0 differ over 11,920 ticks (4,374 notes). With `--loop 300` (3 loops) it matches
+      a Space Age game on 42,525 checks (`harness/run.py --dlc --warmup 60`). game `--verify` checks
+      the clock against RESTART on the bus: 0 differ at 64×40 (started over at 2219 and 2465).
+      320×200 with the song: 12,500 combinators (+25), 79,108 entities, 1.07 ms per tick in Space
+      Age, fully powered.
+    - **Not checked:** the sound itself (the harness records combinators, not speakers).
+
 Still to come (M4): doors; see "Next steps".
 
 Earlier notes that still hold:
@@ -1054,6 +1086,7 @@ Done:
 - Muzzle light (architecture item 16): the view brightens while a weapon flashes.
 - Face expressions (architecture item 17): glances, turning toward an attacker, rampage.
 - Weapon keys and reset (architecture item 18): number buttons and keys pick weapons; reset any time.
+- Music (architecture item 19): a MIDItorio song on a loop, starting over on a new game.
 - Chunks, layout and latency (architecture item 12): six rows per network on signal qualities
   (Space Age), about half the combinators, layout by concept, the bus on a substation row, 17-tick
   raycaster.
@@ -1087,19 +1120,9 @@ Commit only when the user asks.
      scalars); a second nearest layer so overlapping things don't cut each other.
 2. **M6: audio (planned 2026-11-02, user request).** Music on a loop and sound effects, with
    vanilla programmable speakers driven by the circuit.
-   - **Music:**
-     - Find MIDI files and convert them to blueprints with
-       [MIDItorio](https://miditorio.com) or something like it. MIDItorio turns a MIDI file into a
-       blueprint that keeps the song in chests or combinators as memory and plays it on
-       programmable speakers.
-     - Freedoom's own soundtrack (BSD) is in its WAD as MUS lumps, which convert to MIDI.
-       Original or freely licensed music only, as for the art; no id Software music.
-     - Check what a converter emits against Factorio 2.1 before relying on it, and keep the result
-       vanilla.
-   - **Wiring:**
-     - The song plays on a loop from its own clock.
-     - Ideally it restarts on a restart (item 13): reset its clock from `RESTART` on the bus,
-       for example with a gated clock like the bus holds. Not essential if it's hard.
+   - **Music:** done (architecture item 19), for any MIDItorio song the player supplies. A song
+     for the repository would have to be freely licensed: Freedoom's own soundtrack (BSD) is in
+     its WAD as MUS lumps, which convert to MIDI, then MIDItorio.
    - **Sound effects:** short note patterns (the drum kit and similar instruments), each triggered
      by an event on the bus:
      - a shot: the spend deciders' A values;
