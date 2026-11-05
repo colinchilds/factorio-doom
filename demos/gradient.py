@@ -1,4 +1,4 @@
-"""A 16x16 lamp screen showing an animated diagonal gradient, laid out like the planned Doom row
+"""A 16x16 lamp screen showing an animated diagonal gradient, laid out like an early row
 stage: one wire network per row whose lanes are the screen columns, a shared clock broadcast on
 green, three east-facing arithmetic combinators per row, then the lamps.
 
@@ -11,8 +11,8 @@ import json
 import pathlib
 import sys
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "conformance"))
-from bp import EACH, GREEN, GREEN_IN, GREEN_OUT, LETTERS, RED, RED_IN, RED_OUT, Blueprint, cond, out, sig  # noqa: E402
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+from compiler.bp import EACH, GREEN, GREEN_IN, GREEN_OUT, LETTERS, RED, RED_IN, RED_OUT, Blueprint, cond, out, sig  # noqa: E402
 
 W = H = 16
 b = Blueprint("gradient demo")

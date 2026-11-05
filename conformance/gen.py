@@ -9,9 +9,11 @@ Run: python3 conformance/gen.py
 
 import json
 import pathlib
+import sys
 
-from bp import (ANYTHING, EACH, EVERYTHING, GREEN, GREEN_IN, GREEN_OUT, INT_MAX, INT_MIN, LETTERS, QUALITY_LANES,
-                RED, RED_IN, RED_OUT, Blueprint, cond, nets, out, sig)
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+from compiler.bp import (ANYTHING, EACH, EVERYTHING, GREEN, GREEN_IN, GREEN_OUT, INT_MAX, INT_MIN,  # noqa: E402
+                         LETTERS, QUALITY_LANES, RED, RED_IN, RED_OUT, Blueprint, cond, out, sig)
 
 CASES = {}
 DLC_CASES = {}   # need Space Age (quality): conformance/cases_dlc, run with harness/run.py --dlc
@@ -449,9 +451,10 @@ def quality_ops(b):
                        quality_destination_signal=EACH)
         b.wire(prev, 1 if prev == c else RED_IN, s, RED_IN)
         prev = s
+    prev2 = c
     for i, (q, cmp) in enumerate([("uncommon", "="), ("rare", "!="), ("rare", ">="), ("quality-unknown", "=")]):
         s = b.selector(1 + 2 * i, 3, operation="quality-filter", quality_filter={"quality": q, "comparator": cmp})
-        b.wire(c, 1, s, RED_IN) if i == 0 else b.wire(prev2, RED_IN, s, RED_IN)
+        b.wire(prev2, RED_IN, s, RED_IN)
         prev2 = s
     a = b.arithmetic(9, 3, EACH, "*", 2, EACH)
     b.wire(prev2, RED_IN, a, RED_IN)
@@ -462,10 +465,11 @@ def quality_ops(b):
     e = b.decider(15, 3, [cond(EACH, "<", EACH, RED, GREEN)], [out(EACH, networks=RED)], [out(EACH, networks=GREEN)])
     b.wire(t, RED_OUT, e, RED_IN)
     b.wire(d, GREEN_OUT, e, GREEN_IN)
+    prev3 = c
     for i, q in enumerate(["normal", "epic", "rare"]):
         lamp = b.lamp(13 + i, 0, {"use_colors": True, "color_mode": 2, "rgb_signal": sig("signal-R", quality=q)},
                       always_on=True)
-        b.wire(c, 1, lamp, 1) if i == 0 else b.wire(prev3, 1, lamp, 1)
+        b.wire(prev3, 1, lamp, 1)
         prev3 = lamp
     b.wire(prev, RED_OUT, prev3, 1)   # the last transfer (quality-unknown) and the constant: rare R stays dark
 

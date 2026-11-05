@@ -1,4 +1,4 @@
-"""M4 raycaster: Freedoom-textured walls, floors and ceilings, monsters and items, a scripted camera, at any --size.
+"""The raycaster: Freedoom-textured walls, floors and ceilings, monsters and items, a scripted camera, at any --size.
 
 Everything runs as vectors whose lanes are screen columns (no per-column units):
 
@@ -25,12 +25,12 @@ Everything runs as vectors whose lanes are screen columns (no per-column units):
             texels, a shift picks the texel, and one decider per flat color, where the wall's texel
             is 15, outputs that color at the row's brightness (constant: the distance is H / |r|).
             Runs beside the march, so it adds no latency.
-  things    monsters and items (demos/things.py): per column the nearest thing's box column and
+  things    monsters and items (doom/things.py): per column the nearest thing's box column and
             depth, per row its texel; an opaque one in front of the wall kills the wall's pixel
             through V and paints its own color. Timed back from V: no latency.
   view      View: the field of view, pixel aspect and eye height are build constants (default:
             Doom's pixel aspect 1.2 and eye at 40 units, so monsters stand taller than the eye).
-  hud       the status bar (demos/hud.py) in the bottom rows: a constant row plus one decider per
+  hud       the status bar (doom/hud.py) in the bottom rows: a constant row plus one decider per
             (digit or face slot, glyph, row); the view above it keeps the full screen's projection.
 
 Lanes vanish when a value is 0, which would silently drop columns. Every vector that might hit 0
@@ -40,7 +40,7 @@ tests a full vector (lanes visited = the union over all Each operands of all con
 Known limitation: textures are mirrored on wall faces seen from the far side of one axis (u is
 the position along the wall, not along the viewer's right).
 
-  python3 demos/raycast.py --size 160x100 --verify   # fsim vs the netlist evaluation
+  python3 doom/raycast.py --size 160x100 --verify   # fsim vs the netlist evaluation
 """
 import argparse
 import json
@@ -53,13 +53,12 @@ import time
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "conformance"))
 sys.path.insert(0, str(HERE))
-from bp import DEFAULT_SUBSTATION_QUALITY, QUALITY_LANES, Blueprint, encode, quality_arg  # noqa: E402
+from compiler.bp import DEFAULT_SUBSTATION_QUALITY, QUALITY_LANES, Blueprint, encode, quality_arg  # noqa: E402
 from compiler import semantics as sem  # noqa: E402
 from compiler import netlist as nl  # noqa: E402
 from compiler.netlist import EACH, GREEN, LANE_SIGNALS, RED, Collect, Graph, Node, Scalar  # noqa: E402
-from sprite import DEFAULT_GAMMA, DEFAULT_SATURATION, c4 as to_c4, grade, nearest, quantize  # noqa: E402
+from palette import DEFAULT_GAMMA, DEFAULT_SATURATION, c4 as to_c4, grade, nearest, quantize  # noqa: E402
 import hud as hd  # noqa: E402
 import maps  # noqa: E402
 import things as th  # noqa: E402
@@ -73,7 +72,7 @@ K = 16                       # grid lines marched per axis (>= map size)
 FP = 256                     # position units per tile
 CENTER = (maps.ARENA["center"][0] * FP, maps.ARENA["center"][1] * FP)  # camera path: circles this
 RADIUS = int(1.25 * FP)
-PLANE = 676                  # tan(fov/2) * 1024 before View (2026-11-03): about 66 degrees
+PLANE = 676                  # tan(fov / 2) * 1024 at the default 66.85 degree field of view
 HIT = -(1 << 30)
 DS = 1 << 15                 # distance D: 2^15 per tile
 DEFAULT_FOG = 8.0            # tiles to half brightness (4 looked murky on lamps)
@@ -256,8 +255,8 @@ class Shading:
         return cls(a.gamma, a.saturation, a.fog, a.muzzle_light)
 
 
-DEFAULT_VIEW = dict(fov=None, aspect=1.2, eye=40)   # user request 2026-11-03: taller monsters
-# The muzzle light (user request 2026-11-03): per extra light level (Doom's A_Light1 = 1, A_Light2
+DEFAULT_VIEW = dict(fov=None, aspect=1.2, eye=40)
+# The muzzle light: per extra light level (Doom's A_Light1 = 1, A_Light2
 # = 2) the brightness numerator gains LIGHT_K * D, so the dark part of the light curve shrinks by
 # LIGHT_K / 17 per level. 4 is Doom's (1/8 of full per level at the half-bright distance, fog), and
 # it hardly showed on lamps; 6 is a bit stronger (--muzzle-light).
@@ -266,13 +265,12 @@ LIGHT_K = 6
 
 class View:
     """The view's geometry (build parameters; constants in the blueprint, so no combinators or
-    ticks; user request 2026-11-03, the monsters looked short):
+    ticks):
       fov     the horizontal field of view, degrees (Doom: 90)
       aspect  how much taller than wide a pixel shows the world (Doom's 320x200 on a 4:3 screen:
-              1.2); None: the projection height is the screen height (before 2026-11-03, a
-              squat 0.83 at 16:10 with the old 66 degrees)
+              1.2); None: the projection height is the screen height (a squat 0.83 at 16:10)
       eye     the eye's height above the floor in Doom units (a tile, floor to ceiling, is 128;
-              Doom: 41). Before 2026-11-03, 64 (half way up the wall).
+              Doom: 41; 64 is half way up the wall).
     proj(w, h) is the projection height: rows per tile at distance 1."""
 
     def __init__(self, fov=DEFAULT_VIEW["fov"], aspect=DEFAULT_VIEW["aspect"], eye=DEFAULT_VIEW["eye"], plane=None):
@@ -671,11 +669,11 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
     tiles) as scalars of g. extra may hold "angle_offset", added to A by the tables, and
     "angle_sub": A counts 2^sub steps per view angle (0..(256 << sub) - 1). It must hold
     "pos0" = (X0, Y0, (ox, oy)) for things: the position as early as possible, PX ~ X0 + ox.
-    things: [(x, y, frame)] (demos/things.py), or None. shade: Shading (colors, fog).
+    things: [(x, y, frame)] (doom/things.py), or None. shade: Shading (colors, fog).
     hud(g, extra) -> (node, {"health": signal, "ammo": signal, "armor": signal}): the status bar's
-    values (demos/hud.py), or None for no bar. The bar takes the bottom rows; the view above it
+    values (doom/hud.py), or None for no bar. The bar takes the bottom rows; the view above it
     keeps the full screen's projection (proj = h), so it is cropped, not squashed.
-    weapon(g, extra) -> Scalar: the player's weapon picture (a composite id of demos/weapons.py),
+    weapon(g, extra) -> Scalar: the player's weapon picture (a composite id of doom/weapons.py),
     or None. A compositor per view row (one more tick) puts it in front of everything.
     extra may hold "light": light(g, extra) -> (key Scalar, {key: extra light level}), the muzzle
     light (Shading.level): walls, flats and things brighten while the key's level is nonzero.
@@ -706,7 +704,6 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
     # and "aim" (aim(g, col, D, lane): hitscan nodes, combat.py).
     names = {n for _, _, n in things or ()} | set(extra.pop("frames", ()))
     sprites = th.load(sorted(names), shade) if things else None
-    tcolors = len(sprites["colors"]) if things else 0
     frame, aim = extra.pop("frame", None), extra.pop("aim", None)
     # The march wants the position one tick after the angle; a later position would leave every
     # angle-derived vector waiting in delays, so delay the angle instead (shared).
@@ -1146,7 +1143,7 @@ def build_graph(w, h, camera=scripted_camera, g=None, hole=None, tex=DEFAULT_TEX
             out += tp
         if arms:
             wc = []
-            for i, (cid, px) in enumerate(sorted(arms.chunk(y0, n).items())):
+            for cid, px in sorted(arms.chunk(y0, n).items()):
                 wc.append(Node(g, "decider", sem.decider_spec([sem.cond(WF.signal, "=", cid, RED)],
                                                               [sem.out(lane(x, y - y0), constant=v) for x, y, v in px]),
                                red=[COLOR_W], time=t_P, label=f"weapon{y0}.{cid}"))
@@ -1405,10 +1402,10 @@ def verify(path, g, cols, rows, scal, layout, w, h, ticks, lattice, every=5):
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--size", default="160x100")
-    ap.add_argument("--ticks", type=int, default=400)
-    ap.add_argument("--verify", action="store_true")
+    ap = argparse.ArgumentParser(description="Generate the raycaster alone, with a scripted camera.")
+    ap.add_argument("--size", default="160x100", help="screen size in lamps, WxH")
+    ap.add_argument("--ticks", type=int, default=400, help="ticks to simulate with --verify")
+    ap.add_argument("--verify", action="store_true", help="simulate in fsim and check frames")
     ap.add_argument("--every", type=int, default=5, help="check every n-th frame against the evaluation")
     ap.add_argument("--tex", type=int, default=DEFAULT_TEX, help="texture resolution (texels per tile)")
     ap.add_argument("--flat", type=int, default=DEFAULT_FLAT,
@@ -1427,10 +1424,10 @@ def main():
                                            Shading.from_args(a), None if a.no_hud else scripted_hud,
                                            None if a.no_weapon else scripted_weapon, view=View.from_args(a))
     data = b.to_json()
-    data["fsim"] = {"ticks": a.ticks, "doc": f"raycaster M3 {w}x{h}"}
+    data["fsim"] = {"ticks": a.ticks, "doc": f"raycaster {w}x{h}"}
     gen = HERE / "gen"
     gen.mkdir(exist_ok=True)
-    path = gen / f"raycast_{w}x{h}{'' if a.map == maps.DEFAULT else '_' + a.map}.json"
+    path = gen / f"raycast_{w}x{h}{maps.suffix()}.json"
     path.write_text(json.dumps(data, separators=(",", ":")))
     path.with_suffix(".txt").write_text(encode(b.to_json()) + "\n")
     n_comb = sum(1 for e in b.entities if "combinator" in e["name"] and e["name"] != "constant-combinator")

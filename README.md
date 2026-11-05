@@ -1,174 +1,167 @@
 # factorio-doom
 
-A Doom-style first-person shooter built from Factorio 2.1 combinators (no mods; Space Age for
-signal quality, which the screen uses: six rows per network) and shown on a lamp screen. See [CLAUDE.md](CLAUDE.md) for the goal, the planned design, and status.
+A Doom-style first-person shooter built entirely from Factorio 2.1 combinators and shown on a lamp
+screen. No mods, no CPU: a pipelined raycaster made of combinators draws a new frame every tick.
 
-The tools so far:
+- Freedoom-textured walls, floors and ceilings, with distance fog
+- Monsters that wake, chase you around walls, attack on Doom's timing, flinch and die
+- Seven weapons with Doom's animations and muzzle flashes, pickups, a full status bar with the face
+- Death, restart, and looping music
+- Any screen size: 64×40 up to Doom's own 320×200
 
-- **`fsim`** (`crates/fsim`): a tick-accurate circuit-network simulator. It reads a blueprint
-  (string or JSON), simulates every wire network and combinator, and renders the lamps as
-  PNG/GIF frames. It can also print any combinator output or network value each tick.
-- **Harness** (`harness/`): runs blueprints in the real game, windowless (`--benchmark`), with an
-  isolated config and mod directory. It records every combinator output and lamp color per tick.
-- **Conformance suite** (`conformance/`): small blueprints that pin down the game's semantics.
-  The harness runs them in Factorio, `fsim conform` runs them in the simulator, and the two
-  traces must match exactly. The game's recordings are kept as golden files, so the comparison
-  also runs offline (`cargo test`).
-- **Benchmarks** (`bench/`): M0 UPS measurements. A 320×200 lamp screen running a 9-op pixel
-  pipeline costs about 1 ms per tick in the game. CLAUDE.md has the table.
-- **Sprite demo** (`demos/sprite.py`): a Freedoom monster (BSD-licensed art, `assets/freedoom/`)
-  walking toward the camera, drawn by combinators at any `--size`. The `.txt` file it writes is a
-  blueprint string to paste into the game.
-- **Raycaster** (`demos/raycast.py`): Freedoom-textured walls, floors and ceilings rendered
-  entirely by combinators at any `--size` (about 7,600 at 160×100), six screen rows per network
-  (one per signal quality, so it needs Space Age), built with the netlist compiler
-  (`compiler/`), which balances latency, places and wires the circuit, and evaluates it as the
-  reference.
-- **The game** (`demos/game.py`): the raycaster driven by a chest input pad (god mode, drop
-  items with Z): walk, turn (slowly at first, for aiming), slide along walls. Freedoom monsters
-  and items stand on the map (`demos/things.py`), hidden behind nearer walls, and items are picked
-  up (`demos/touch.py`). Monsters (`demos/monsters.py`) sleep until they see you in front of them
-  or get shot, then walk at you around walls, and attack on Doom's timing: the zombieman shoots
-  (often missing at range), the imp scratches up close and throws fireballs (no projectiles yet:
-  half of them hit). Any hit makes a monster flinch, which stops its attack, so punching works. A Freedoom status bar (`demos/hud.py`) shows
-  ammo, health, armor and the face, which glances around, turns toward whatever hurts you and grits
-  its teeth when you fire for a while (`demos/face.py`). Seven Freedoom weapons (`demos/weapons.py`): the gun in front
-  of the view, the number buttons pick one (Doom's slots: 1 fist ... 7 BFG), fire plays Doom's animation and uses ammo. Shots hit the
-  nearest live monster in the middle of the view (`demos/combat.py`), which flinches with its
-  pain frame and dies with Freedoom's death animation, leaving a corpse. At 0 health you're dead
-  (frozen, gun lowered); press Use to start a new game. The pad's reset button, set apart to the
-  right of the D-pad, starts a new game at any time. Optional music (`demos/music.py`): any song
-  converted by [MIDItorio](https://miditorio.com), on programmable speakers, looping, and starting
-  over with each new game.
-- **Demos** (`demos/`): `gradient.py` builds a 16×16 lamp screen laid out like the planned
-  renderer's row stage. fsim and the game agree on it lamp for lamp.
+Art comes from [Freedoom](https://freedoom.github.io/) (BSD). The maps are original.
 
-## Usage
+## Requirements
+
+- **Factorio 2.1 with Space Age.** The blueprint is vanilla, but the screen stores six rows per
+  wire network on Space Age's signal qualities.
+- **Python 3.10+** (standard library only) to generate blueprints.
+- **Rust** (optional) to build `fsim`, the simulator used by the `--verify` checks.
+
+## Quick start
 
 ```sh
-cargo build --release
-cargo test --release                              # fsim vs. the golden game recordings
-
-# Simulate and render lamps (one PNG per captured tick, and/or a GIF)
-./target/release/fsim run demos/gradient.json --ticks 80 --every 4 --scale 12 \
-    --frames out/frames --gif out/run.gif
-# Debug: print an entity's output, or a network (ENTITY:CONNECTOR), every tick
-./target/release/fsim run some.bp --ticks 10 --probe 12 --net 12:1
-./target/release/fsim decode some.bp              # blueprint string -> JSON
-
-# Conformance against the real game (needs Factorio 2.1 installed)
-python3 conformance/gen.py                        # regenerate conformance/cases/*.json (and cases_dlc/)
-python3 harness/run.py conformance/cases -o conformance/game_dump.json   # ~2 s
-./target/release/fsim conform                     # every case must PASS
-# Space Age cases (quality selectors, quality pole reach): run with the DLC
-python3 harness/run.py --dlc conformance/cases_dlc -o conformance/game_dump_dlc.json
-./target/release/fsim conform conformance/cases_dlc --dump conformance/game_dump_dlc.json
-
-# Any blueprint can be checked the same way
-python3 harness/run.py demos/gradient.json -o demos/golden/gradient_dump.json
-./target/release/fsim conform demos --dump demos/golden/gradient_dump.json
-
-# UPS benchmarks: synthetic row-stage screens, timed in the game with recording off
-python3 bench/m0.py 160x100 320x200               # -> bench/gen/*.json
-python3 harness/run.py --bench 300 bench/gen/*_160x100.json -o bench/m0_160x100.json
-
-# Raycaster (M3: Freedoom-textured walls): generate, check sampled frames against the evaluation
-python3 demos/raycast.py --size 160x100 --verify   # -> demos/gen/raycast_160x100.{json,txt}
-python3 demos/raycast.py --size 64x40 --tex 32 --verify --every 1   # smaller textures, every frame
-python3 demos/raycast.py --size 160x100 --flat 0   # untextured floor/ceiling (cheaper); --flat 8/16/32
-python3 demos/game.py --size 320x200 --gamma 0.4 --fog 12   # brighter screen (--gamma 1 --saturation 1 --fog 4: Freedoom's colors)
-python3 demos/game.py --size 160x100 --muzzle-light 8   # stronger muzzle flash (default 6, Doom's 4, 0 = none)
-python3 demos/raycast.py --size 160x100 --no-things   # without the monsters and items (also game.py)
-python3 demos/game.py --size 160x100 --no-hud      # without the status bar: the view takes the whole screen
-python3 demos/game.py --size 160x100 --no-weapon   # without the weapon in front of the view
-python3 demos/weapons.py                           # weapon timelines and the overlay's cost per size
-python3 demos/game.py --size 160x100 --turn-slow 1 --turn 4 --turn-ramp 18   # turning: per tick, slow then fast
-python3 demos/game.py --size 160x100 --fov 90 --aspect 1.2 --eye 40   # Doom's view (default: 67 degrees, 1.2, 40)
-python3 demos/game.py --size 160x100 --aspect 0 --eye 64   # the view before 2026-11-03 (squat, eye half way up)
-python3 harness/run.py --warmup 60 out/dir -o dump.json   # deep pipelines: settle before t0
-python3 harness/run.py --dlc --warmup 60 --every 2 out/dir -o dump.json   # long runs: record every 2nd tick (memory)
-# Substations default to legendary (28x28 supply, fewer dead pixels). The screen needs Space Age
-# (quality lanes), so game checks run with --dlc: harness/run.py --dlc --bench 30 demos/gen/raycast_160x100.json
-
-# Input pad (god mode, drop items with Z): check the decoder against its reference model
-python3 demos/input_pad.py --size 320x200 --verify   # -> demos/gen/input_pad_n9.{json,txt}
-./target/release/fsim run demos/gen/input_pad_n9.json --input inserts.json --probe 12  # [[tick, entity, item, count]]
-
-# The game (M2 movement + M3 textured walls, floors, ceilings): the raycaster driven by the pad (walk, turn, collide);
-# player state vs reference, frames
-python3 demos/game.py --size 160x100 --verify      # -> demos/gen/game_160x100.{json,txt}
-python3 demos/game.py --size 160x100 --map test --verify   # the map the scripted fight was tuned on (death, restarts)
-python3 demos/game.py --size 160x100 --map acid    # the showcase map (demos/maps.py) -> game_160x100_acid.{json,txt}
-
-# Sprite demo: generate, check every frame against the reference, preview as a GIF
-python3 demos/sprite.py --size 160x100 --verify    # -> demos/gen/sprite_160x100.{json,txt}
-./target/release/fsim run demos/gen/sprite_160x100.json --every 2 --scale 4 --gif out/sprite.gif
-./target/release/fsim run demos/gen/sprite_160x100.json --ppm out/ppm   # raw frames for scripts
-python3 tools/wad.py freedoom2.wad --list TROO     # sprites in a WAD (see assets/freedoom/)
-python3 tools/wad.py freedoom2.wad --textures BRICK  # wall textures; --texture-png DIR NAME... previews
-python3 tools/wad.py freedoom2.wad --flats FLOOR     # floor/ceiling flats; --flat-png DIR NAME... previews
-
-python3 harness/run.py --dlc --bench 30 demos/gen/sprite_160x100.json   # imports in Space Age?
-python3 harness/run.py --lanes                    # refresh conformance/lane_signals.json
-python3 harness/run.py --poles                    # refresh conformance/pole_quality.json (DLC)
-python3 harness/run.py --signals                  # refresh conformance/signal_order.json
-python3 harness/run.py --discover                 # export a blueprint with every option set
+python3 doom/game.py --size 160x100     # writes doom/gen/game_160x100.txt
 ```
 
-### Music (optional)
+1. Copy the contents of `doom/gen/game_160x100.txt` and import it as a blueprint in a Space Age game
+   (the map editor, `/editor`, is easiest).
+2. Place it and connect one power source to any of its substations; the blueprint wires its own
+   power network.
+3. Play from the input pad right of the screen: with an item in hand, hover over a button and drop
+   one item (Z). Holding Z repeats.
 
-Convert a MIDI file with [MIDItorio](https://miditorio.com), save the blueprint string to a file,
-and pass it to the game. The song loops at its end and starts over on a new game (Use after dying,
-or reset). Its constant combinator (the label) switches the music off and on. Songs stay out of
-the repository (`music/` is ignored): only original or freely licensed content goes in.
+| Pad | |
+|---|---|
+| D-pad | Forward, back, turn left and right on the edges; combinations on the corners |
+| Center (crosshair) | Fire |
+| 1–7 | Weapons, in Doom's slots (1 fist … 7 BFG) |
+| U | Use: start a new game after dying |
+| R (iron chests, right) | Reset: a new game at any time |
+
+`--size 320x200` (Doom's resolution) makes about 80,000 entities and an 8 MB blueprint string, and runs
+at about 1.2 ms per tick of the game's 16.7 ms budget.
+
+## Options
 
 ```sh
-python3 demos/game.py --size 160x100 --music music/song.txt       # the game with the song
-python3 demos/music.py music/song.txt --verify                    # the song alone, every speaker decider checked
-python3 demos/music.py music/song.txt --loop 300 --ticks 1700     # a short loop, for a game run (harness --dlc)
+python3 doom/game.py --help
 ```
 
-### Keyboard input (optional mod)
+| Option | Default | |
+|---|---|---|
+| `--size WxH` | 160x100 | Screen size in lamps |
+| `--map NAME` | arena | `arena`, `acid` (a tunnel into an acid hall) or `test` |
+| `--music FILE` | music/level1.txt | A [MIDItorio](https://miditorio.com) blueprint string: loops, restarts with each new game (`--no-music`: none) |
+| `--fov`, `--aspect`, `--eye` | 67, 1.2, 40 | Field of view (degrees), pixel aspect, eye height (Doom units) |
+| `--gamma`, `--saturation`, `--fog` | 0.5, 1.25, 8 | Color grade and fog distance (`1 1 4`: Freedoom's own colors) |
+| `--muzzle-light` | 6 | Brightening while a weapon flashes (0 = none) |
+| `--tex`, `--flat` | 64, 16 | Wall and floor texture resolution (`--flat 0`: untextured, cheaper) |
+| `--no-things`, `--no-hud`, `--no-weapon` | | Leave out monsters and items, the status bar, the gun |
+| `--turn-slow`, `--turn`, `--turn-ramp` | 1, 4, 18 | Turn speed while a button is first held, after the ramp, and the ramp's length in ticks |
+| `--substation-quality` | legendary | Fewer dead pixels; `normal` for game checks without Space Age |
 
-`mod/doom-input` drives the blueprint from the keyboard: movement keys (WASD, or the arrows once
-bound as alternative movement keys in Settings > Controls) walk and turn, Space fires, 1-7 pick
-a weapon, F is use and Ctrl+Shift+R resets (a new game). The number keys still select quickbar
-slots too; rebind any of these under Settings > Controls > Mods. Toggle it with the joystick button on the shortcut bar (or
-Ctrl+Shift+J); while on, the camera stays put. Without the mod the blueprint uses its chest pad.
+**Music:** the default song is a fan-made MIDI recreation of Doom's first-level theme. For another,
+convert a MIDI file with MIDItorio, save the blueprint string to a file and pass
+`--music music/song.txt`. The song's constant combinator switches it off and on in the game.
+
+## Keyboard mod (optional)
+
+The pad works without mods, but `mod/doom-input` lets you play from the keyboard: the movement keys
+walk and turn, Space fires, 1–7 pick a weapon, F is use and Ctrl+Shift+R resets. Toggle it with the
+joystick button on the shortcut bar (or Ctrl+Shift+J); while it's on, the camera stays put.
 
 ```sh
 ln -s "$PWD/mod/doom-input" ~/Library/Application\ Support/factorio/mods/doom-input   # macOS
-python3 tools/mod_icon.py                         # redraw the shortcut icon
-python3 demos/game.py --size 64x40 --keys --verify   # the scripted walk typed on the keyboard
 ```
 
-Set `FACTORIO` to use a different game binary. The default is the Steam install on macOS.
-Wire connector ids in blueprint `wires` are 1/2 = red/green input (or the only connector, on
-lamps, poles and constant combinators), 3/4 = red/green combinator output, 5 = copper.
+The arrow keys work once bound as alternative movement keys (Settings > Controls). The number keys
+still select quickbar slots; rebind any key under Settings > Controls > Mods.
 
-## Verified semantics (Factorio 2.1.23)
+## How it works
 
-Each of these was measured in the game and is checked by a conformance case.
+The circuit network is used as a SIMD machine: each signal is a lane, a wire network is a vector
+register and a combinator is a one-tick vector op. The renderer's lanes are screen columns. For each
+column it marches the ray across every grid line at once (one division each), keeps the nearest wall
+hit with min trees, looks up packed texture strips, and runs one small pipeline per six screen rows
+to pick each pixel's texel and color. Monsters, items, the gun and the status bar are composited in
+the same pipelines, so the whole thing stays about 18 ticks deep.
 
-| Topic | Behavior |
+The game logic (movement and collision, weapons, monsters, pickups, the face) is state held in
+registers on a shared bus. The rules are also written in plain Python, and every build is
+checked against them.
+
+See [docs/design.md](docs/design.md) for the full design and [docs/roadmap.md](docs/roadmap.md) for
+what's next.
+
+## Repository layout
+
+| Path | |
 |---|---|
-| Timing | Every network is the sum of what feeds it; every combinator outputs one tick after it reads: `N(t) = constants + O(t-1)`, `O(t) = f(N(t))`. Lamp *color* follows its input one tick sooner than its *on/off condition* does. |
-| `Each(red) op Each(green)` | Works lane by lane. The lanes are the union of signals on both wires; a side that's missing counts as 0. |
-| Lanes | Lanes come only from the wires the `Each` operands read. A signal at +5 red / −5 green is **not** a lane for `Each(both)`. |
-| Arithmetic | int32 that wraps. `/` and `%` truncate toward zero; x/0 → 0, `INT_MIN / -1` → 0. Shift amounts are masked to 5 bits, and `>>` keeps the sign. `^` wraps; a negative exponent gives 0 unless the base is ±1. |
-| Named output from `Each` | Arithmetic sums the lanes, wrapping. A decider outputs constant × the matching lane count, or the sum of the matching lanes' values when copying from input. |
-| Decider else-output | Per lane: lanes that fail the condition get the else outputs. With no lanes at all, neither branch outputs. |
-| Decider `Each` ranges and outputs | Several `Each` conditions in one decider are evaluated per lane together, so `lo <= Each AND Each < hi OR ...` is a per-lane range lookup. Several outputs on the same lane add up: `Each = constant` plus `Each` copied from a wire gives constant + value, in either branch (`decider_ranges` case). |
-| Decider `Each` lanes | An `Each` decider visits the union of the lanes on every wire read by any `Each` operand of any condition. A condition on green (e.g. `Each(green) != 0`, ANDed in) brings in lanes that are absent (0) on red, so a range test on red can match 0 there (`decider_lanes` case). |
-| Decider logic | AND binds tighter than OR. `Everything` is vacuously true and `Anything` is false when there are no inputs. `Everything` output under `Each` conditions gives nothing. |
-| Selector | Ties keep the game's internal signal order when selecting the max; the min list is the max list reversed. `index_comparator` supports `<`, `<=` and so on (N-highest / N-lowest). The index can come from a signal on either wire; a negative index gives nothing. Count and time modes are also covered. |
-| Signal order | The game's internal order (items, fluids, virtual, recipes, entities, …), saved in `conformance/signal_order.json`. Vanilla has **2,878 signal lanes** (1,439 signals × normal / quality-unknown). |
-| Lamps | Packed RGB = `(v>>16)&255, (v>>8)&255, v&255`. Components are clamped to 0–255. Color mapping uses the first positive color signal in prototype order; with none, the lamp shows its default color. A lamp with no wires ignores its circuit settings. |
-| Wire reach | A wire connects when the straight-line **gap between the two tile footprints** is ≤ the *shorter* reach of its two ends; **between two poles it's the distance between their centers** instead. Combinators, lamps and constants reach 9, small poles 7.5, medium 9, big 32, substations 18. Longer wires are silently dropped when a blueprint is built; fsim warns about them. Quality raises reach and supply area (`conformance/pole_quality.json`): a legendary substation supplies 28×28 and reaches 28, a legendary medium pole reaches 19. |
-| Per-entity wire selection (2.1.7) | `input_networks` / `output_networks` don't exist for combinators (they always choose wires per signal); only lamps and similar entities have them. |
+| `doom/` | The game's generators: `game.py` (entry point), `raycast.py` (renderer), `things.py`, `monsters.py`, `combat.py`, `weapons.py`, `touch.py`, `hud.py`, `face.py`, `input_pad.py`, `music.py`, `maps.py` |
+| `compiler/` | Netlist compiler (`netlist.py`: latency balancing, placement, wiring, evaluation), combinator semantics, blueprint builder (`bp.py`) |
+| `crates/fsim/` | Tick-accurate circuit simulator (Rust) |
+| `harness/` | Runs blueprints in a windowless Factorio and records every combinator per tick |
+| `conformance/` | Small blueprints pinning down the game's semantics, golden recordings, measured signal and pole data |
+| `mod/doom-input/` | The optional keyboard mod |
+| `demos/` | Early standalone demos: a gradient screen and a walking sprite |
+| `bench/` | UPS benchmarks |
+| `assets/freedoom/` | Freedoom sprites, textures, status bar and weapons as JSON |
+| `tools/` | WAD extraction, the mod icon |
 
-## Not simulated yet
+## Development
 
-- Selector modes: random, stack size, rocket capacity, the quality modes, and time mode's day signals.
-- Power: fsim assumes everything is powered. The harness reports any unpowered entity as a harness error.
-- Lamps' 2.1.7 `input_networks` setting, quality-scaled wire reach, and display panels.
+```sh
+cargo build --release && cargo test --release   # fsim, checked against golden game recordings
+
+python3 doom/game.py --size 64x40 --map test --verify   # scripted session: every rule and sampled frames
+python3 doom/raycast.py --size 160x100 --verify         # the renderer alone, scripted camera
+python3 doom/input_pad.py --verify                      # the pad's decoder
+python3 doom/music.py music/level1.txt --verify         # a song's clock and speakers
+
+./target/release/fsim run doom/gen/raycast_160x100.json --ticks 200 --every 4 --gif out/run.gif
+./target/release/fsim run some.json --probe 12 --net 12:1   # print an entity or network per tick
+```
+
+`--verify` simulates the blueprint in fsim and compares it with independent references: the netlist
+evaluation (frame for frame), a float raycaster, and the Python rules.
+
+**Against the real game** (`harness/`; set `FACTORIO` to the game binary, the default is Steam on
+macOS):
+
+```sh
+python3 harness/run.py --dlc --bench 30 doom/gen/game_160x100.json   # imports, fully powered? ms per tick
+python3 harness/run.py --dlc --warmup 60 --every 2 DIR -o dump.json  # record a run (deep pipelines need the warm-up)
+./target/release/fsim conform DIR --dump dump.json                   # compare with fsim
+```
+
+**Conformance:** `python3 conformance/gen.py` regenerates the cases;
+`python3 harness/run.py conformance/cases -o conformance/game_dump.json` records them in the game
+(`--dlc` with `conformance/cases_dlc`); `fsim conform` compares. The measured rules are listed in
+[docs/semantics.md](docs/semantics.md).
+
+**Assets:** `tools/wad.py` extracts sprites, textures and flats from `freedoom2.wad`; see
+[assets/freedoom/README.md](assets/freedoom/README.md).
+
+## Credits
+
+- **[Freedoom](https://freedoom.github.io/)** 0.13.0: every sprite, texture, flat, status bar
+  graphic and weapon, under its BSD 3-clause license
+  ([assets/freedoom/COPYING.txt](assets/freedoom/COPYING.txt)).
+- **[decider-compiler](https://github.com/Globexix/decider-compiler)** by Globexix, and its
+  [one-combinator Flappy Bird](https://factorioprints.com/view/-P5CDU0KirKtOhXeCKSd): the
+  inspiration for this project, and the idea of a decider with a long OR'd condition list as a
+  one-tick lookup table.
+- **[giftorio](https://github.com/colinchilds/giftorio)**: the lamp screen this builds on (packed
+  RGB lamps, substations on a lattice inside the screen).
+- **[MIDItorio](https://miditorio.com)**: converts MIDI files into the speaker blueprints that
+  `--music` takes.
+- **The default song** (`music/level1.txt`): a freely licensed, fan-made MIDI recreation of
+  "At Doom's Gate" (Bobby Prince, Doom's first level), converted with MIDItorio.
+- **Doom** by id Software: the game behavior (state timings, monster attack chances, the status
+  bar face's rules, weapon placement) follows the released Doom source. Its numbers are
+  reimplemented as combinators; no code or art of id Software's is included.
+
+## License
+
+[MIT](LICENSE). The Freedoom-derived files in `assets/freedoom/` keep Freedoom's BSD license.

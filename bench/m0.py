@@ -1,12 +1,13 @@
-"""M0: what does a lane-op cost in the real game? Generates synthetic row-stage blueprints.
+"""UPS benchmarks: what does a lane-op cost in the real game? Generates synthetic row-stage
+blueprints.
 
-Every variant uses the planned row layout: one wire network per screen row whose lanes are the
+Every variant uses a row layout: one wire network per screen row whose lanes are the
 columns (W signals), plus a shared column "bus" (green) and a free-running clock (red) so values
 change every tick. Rows are independent copies, so cost should scale with W x H.
 
   baseline       one constant combinator (fixed per-tick cost of the game)
   lamps          per row: s1 = bus + T, then W lamps (packed RGB)
-  pixel          per row: 9 combinators shaped like the planned texture path, then W lamps
+  pixel          per row: 9 combinators shaped like a texture path, then W lamps
   pixel_nolamps  the same 9 combinators, no lamps
   lookupN        per row: s1, then one decider with N OR'd `Each = k` conditions (no lamps)
 
@@ -26,8 +27,8 @@ import pathlib
 import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent / "conformance"))
-from bp import EACH, GREEN, GREEN_IN, RED, RED_IN, RED_OUT, Blueprint, cond, out, sig  # noqa: E402
+sys.path.insert(0, str(HERE.parent))
+from compiler.bp import EACH, GREEN, GREEN_IN, RED, RED_IN, RED_OUT, Blueprint, cond, out, sig  # noqa: E402
 
 # Column signals: safe in vanilla and Space Age (harness/run.py --lanes). No virtual signals, so
 # the special ones (each/everything/anything) and the clock T can't collide with a column.
@@ -135,7 +136,7 @@ def main():
                 continue
             b = build(v, w, h)
             data = b.to_json()
-            data["fsim"] = {"ticks": 60, "doc": f"M0 {v} {w}x{h}"}
+            data["fsim"] = {"ticks": 60, "doc": f"bench {v} {w}x{h}"}
             name = "baseline" if v == "baseline" else f"{v}_{w}x{h}"
             path = gen / f"{name}.json"
             path.write_text(json.dumps(data, separators=(",", ":")))

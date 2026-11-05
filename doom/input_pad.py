@@ -36,8 +36,8 @@ KEYS_PRESSED sit on HELD and PRESSED. The mod writes 1 on a button's lane while 
 sources simply add. In schedules, an entry on one of them sets that signal ([t, entity, signal,
 value], fsim's and the harness's constant-combinator form of an insert).
 
-    python3 demos/input_pad.py --size 320x200 --verify   # fsim vs the reference model
-    python3 harness/run.py demos/gen/input_pad_n9.json   # same schedule in the game, then
+    python3 doom/input_pad.py --size 320x200 --verify   # fsim vs the reference model
+    python3 harness/run.py doom/gen/input_pad_n9.json   # same schedule in the game, then
     fsim conform <dir with that json> --dump harness/out/dump.json
 """
 import argparse
@@ -51,8 +51,7 @@ import sys
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "conformance"))
-from bp import DEFAULT_SUBSTATION_QUALITY, Blueprint, encode, quality_arg, sig  # noqa: E402
+from compiler.bp import Blueprint, encode, quality_arg, sig  # noqa: E402
 from compiler import netlist  # noqa: E402
 from compiler import semantics as sem  # noqa: E402
 from compiler.netlist import EACH, GREEN, RED  # noqa: E402
@@ -317,7 +316,7 @@ def build_pad(b, x0, y0, n, hold=DEFAULT_HOLD, meters=False):
 
     taken = b.occupied()
     usable = lambda x, y: (x, y) not in taken  # noqa: E731
-    for name, members in nets.items():
+    for members in nets.values():
         if len(members) > 1:
             wire_net(b, members, taken, usable)
     return out
@@ -449,11 +448,11 @@ def verify(path, pad, inserts, ticks, hold):
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description="Generate the chest input pad alone.")
     ap.add_argument("--size", default="320x200", help="screen size the buttons are sized for")
     ap.add_argument("--button-size", type=int, help="chests per button side (default from --size)")
     ap.add_argument("--hold", type=int, default=DEFAULT_HOLD, help="ticks a button stays held after a drop")
-    ap.add_argument("--verify", action="store_true")
+    ap.add_argument("--verify", action="store_true", help="simulate scripted drops in fsim and check the decoder")
     quality_arg(ap)
     a = ap.parse_args()
     _, h = map(int, a.size.lower().split("x"))

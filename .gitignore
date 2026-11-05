@@ -1,11 +1,24 @@
+# Build output
 target/
-harness/instance/data/
-harness/out/
 __pycache__/
-.venv/
-.idea/
-bench/gen/
-harness/mods/fsim-harness/cases.lua
-demos/gen/
 out/
-music/
+doom/gen/
+demos/gen/
+bench/gen/
+
+# Harness state (written by harness/run.py)
+harness/instance/
+harness/out/
+harness/mods/fsim-harness/cases.lua
+
+# WADs for tools/wad.py
+*.wad
+
+# Editors, tools and OS files
+.venv/
+.ruff_cache/
+.idea/
+.vscode/
+.claude/
+*.swp
+.DS_Store

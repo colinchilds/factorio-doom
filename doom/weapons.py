@@ -14,7 +14,7 @@ Switching: Doom lowers the gun 6 pixels a tic (16 tics to WEAPONBOTTOM, 96 below
 weapon, and raises the new one the same way. The ready frame is drawn at DROPS steps of 12
 pixels (12 rows at 320 x 200), so the gun moves about 17 times a second.
 
-State (all on the player's state bus, see demos/game.py):
+State (all on the player's state bus, see doom/game.py):
     W   weapon, an index into WEAPONS (0 = the pistol, the start weapon).
     A   animation tick: 0 = ready, 1..L while firing, LOWER.. lowering, BOTTOM down, RAISE..
         raising.
@@ -32,7 +32,6 @@ again at once if a selection came while it rose).
 The view shows composite table[W][A]; raycast.build_graph(..., weapon=...) overlays it.
 """
 import json
-import math
 import pathlib
 import sys
 
@@ -312,7 +311,7 @@ def slot_index(slot):
 
 
 # ---------------------------------------------------------------------------------------------
-# Game logic: decider specs for the state machine (demos/game.py places and wires them).
+# Game logic: decider specs for the state machine (doom/game.py places and wires them).
 
 def logic(W, A, P, FIRE, SEL, ammo, start, health=None):
     """Deciders reading the state bus (red), as [(label, spec, target)], target "bus" (W, A and P,

@@ -22,9 +22,8 @@ import pathlib
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "conformance"))
 sys.path.insert(0, str(ROOT))
-from bp import Blueprint, sig  # noqa: E402
+from compiler.bp import sig  # noqa: E402
 
 from compiler import semantics as sem  # noqa: E402
 
@@ -107,7 +106,7 @@ class Graph:
 
     def delay(self, n, k):
         """n delayed by k ticks (shared chains)."""
-        for i in range(k):
+        for _ in range(k):
             key = (n.id, 1)
             if key not in self._delays:
                 base = n.label if not n.label.startswith("delay") else n.label.split(" ", 1)[1]
@@ -657,7 +656,7 @@ def _mst(fps, boxed=(), joined=()):
         if size < 10 ** 6:   # boxed long edges only once nothing else is left
             cand = [c for c in cand if c[0] < 1e6]
         cand.sort()
-        for d, i, j in cand:
+        for _, i, j in cand:
             ri, rj = find(i), find(j)
             if ri != rj:
                 parent[ri] = rj

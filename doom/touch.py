@@ -1,7 +1,5 @@
-"""Thing contact (M4, 2026-11-02, user request): items are picked up when you walk over them. Live
-monsters are solid (game.player_graph adds their boxes to the wall corners); dead ones (combat.py)
-aren't. Until 2026-11-03 a live monster also hurt you while you stood close to it (the pain clock
-COOL, DAMAGE every COOLDOWN ticks); monsters.py's attacks replaced that.
+"""Thing contact: items are picked up when you walk over them. Live monsters are solid
+(game.player_graph adds their boxes to the wall corners); dead ones (combat.py) aren't.
 
 Everything here reads the state bus (REG's red output, game.py) and is one tick deep, like the
 weapon logic:
@@ -21,8 +19,7 @@ import pathlib
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
-sys.path.insert(0, str(HERE.parent / "conformance"))
-from bp import sig  # noqa: E402
+from compiler.bp import sig  # noqa: E402
 from compiler import semantics as sem  # noqa: E402
 from compiler.netlist import RED  # noqa: E402
 

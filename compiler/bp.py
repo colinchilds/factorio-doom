@@ -1,4 +1,4 @@
-"""Tiny blueprint builder for conformance cases (Factorio 2.1 blueprint JSON).
+"""A small blueprint builder (Factorio 2.1 blueprint JSON).
 
 Wire connector ids: 1/2 = red/green input (or the only connector on lamps, poles and constant
 combinators), 3/4 = red/green combinator output, 5 = copper.
@@ -14,7 +14,7 @@ INT_MAX, INT_MIN = 2**31 - 1, -(2**31)
 
 # Supply area and wire reach of each pole at every quality, measured in a Space Age game
 # (harness/run.py --poles). Quality above normal needs the quality mod (Space Age).
-POLES = json.loads((pathlib.Path(__file__).resolve().parent / "pole_quality.json").read_text())
+POLES = json.loads((pathlib.Path(__file__).resolve().parent.parent / "conformance" / "pole_quality.json").read_text())
 QUALITIES = sorted(POLES["substation"], key=lambda q: POLES["substation"][q]["level"])
 # Generated blueprints for players use legendary substations: a 28x28 supply area instead of
 # 18x18, so the lamp screen loses 0.5% of its pixels to substations instead of 1.2%. Game checks
@@ -252,7 +252,7 @@ class Blueprint:
                 w, h = h, w
             x0, y0 = e["position"]["x"] - w / 2, e["position"]["y"] - h / 2
             rects[e["entity_number"]] = (x0, y0, x0 + w, y0 + h, self.reach(e))
-        for a, ca, c, cc in self.wires:
+        for a, ca, c, _ in self.wires:
             if ca == COPPER:
                 continue
             ra, rc = rects[a], rects[c]

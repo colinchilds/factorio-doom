@@ -1,10 +1,9 @@
-"""M4 things: Freedoom monsters and items standing on the map, drawn by the raycaster with
+"""Things: Freedoom monsters and items standing on the map, drawn by the raycaster with
 occlusion (raycast.build_graph(..., things=...)).
 
 Sprites are on the walls' texel grid (STEX = 64 texels per tile, Doom units / 2) in a box of
 HP = 32 rows from 64 units above the floor down to it. Texel row te = View.thing_eye() is at eye
-level (0 with the eye at 64 units, before 2026-11-03: only the lower half of the screen had thing
-rows; 12 with the eye at 40, so monsters reach above it as in Doom). Per column only the nearest
+level (12 with the eye at 40 units, so monsters reach above it as in Doom; 0 with the eye at 64). Per column only the nearest
 thing whose box covers it is drawn (a farther one is hidden in the nearer one's box columns,
 transparent texels included). A thing may move (the `pos` hook: a monster's position from the
 state bus, monsters.py).
@@ -51,7 +50,8 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(HERE))
 from compiler import semantics as sem  # noqa: E402
 from compiler.netlist import EACH, GREEN, LANE_SIGNALS, RED, Collect, Scalar  # noqa: E402
-from sprite import nearest, pack, quantize  # noqa: E402
+import maps  # noqa: E402
+from palette import nearest, pack, quantize  # noqa: E402
 
 ASSETS = ROOT / "assets" / "freedoom" / "sprites.json"
 STEX = 64                  # sprite texels per tile (each texel 2x2 Doom units, like walls at tex 64)
@@ -71,20 +71,8 @@ FRAME_BITS = 6
 YIELD_D = 1 << 29          # added to a yielding thing's Dt leaf (Dt = alpha * 64 + frame < 2^29)
 COLORS = 15                # thing texels 1..15, 0 = transparent
 
-# Things on the map: (x, y) in tiles and the sprite frame. Our placement, Freedoom's art.
-# The game (touch.py): monsters are solid and hurt up close, items are picked up. An imp near the
-# start, armor, ammo and a medikit along the south wall (game.py's scripted walk meets them all).
-# The barrel and column gave way to items, 2026-11-02: 8 things fit.
-THINGS = [
-    (5.5, 4.5, "TROOA1"),
-    (10.5, 7.5, "POSSA1"),
-    (10.1, 10.9, "TROOA1"),
-    (5.2, 12.7, "POSSA1"),
-    (5.6, 13.5, "AMMOA0"),
-    (4.45, 14.65, "MEDIA0"),
-    (7.4, 13.35, "ARM1A0"),
-    (13.5, 13.5, "SBOXA0"),
-]
+# Things on the current map (maps.select): (x, y) in tiles and the sprite frame, monsters first.
+THINGS = list(maps.ARENA["things"])
 
 
 def load(names, shade):

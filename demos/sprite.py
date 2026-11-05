@@ -1,5 +1,5 @@
 """Sprite demo: a Freedoom monster walking toward and away from the camera, rendered by
-combinators on a W x H lamp screen. It exercises the planned texture path at any screen size:
+combinators on a W x H lamp screen. It was the first test of the texture path, at any screen size:
 
   scalar pipeline   clock -> walk frame, distance -> sprite height, 16.16 texel step, offsets
   column stage      lanes = screen columns: u = ((c - left) * step) >> 16, then a bit-sliced
@@ -26,9 +26,11 @@ import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent
-sys.path.insert(0, str(ROOT / "conformance"))
-from bp import (EACH, EVERYTHING, GREEN, GREEN_IN, GREEN_OUT, RED, RED_IN, RED_OUT, LETTERS,  # noqa: E402
-                DEFAULT_SUBSTATION_QUALITY, Blueprint, cond, encode, out, quality_arg, sig)
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "doom"))
+from compiler.bp import (EACH, EVERYTHING, GREEN, GREEN_IN, GREEN_OUT, RED, RED_IN, RED_OUT, LETTERS,  # noqa: E402
+                         DEFAULT_SUBSTATION_QUALITY, Blueprint, cond, encode, out, quality_arg, sig)
+from palette import nearest, pack, quantize  # noqa: E402
 
 # Signals that exist, unhidden, in both vanilla and Space Age (harness/run.py --lanes). Virtual
 # signals aren't in the list, so the named scalars (letters) can't collide with a lane.
@@ -81,59 +83,6 @@ def load_sprite(prefix):
     colors = quantize([c for b in boxes for r in b for c in r if c is not None], 15)
     texels = [[[0 if c is None else 1 + nearest(colors, c) for c in r] for r in b] for b in boxes]
     return names, sw, sh, colors, texels
-
-
-def nearest(colors, c):
-    return min(range(len(colors)), key=lambda k: sum((a - b) ** 2 for a, b in zip(colors[k], c)))
-
-
-def quantize(pixels, k):
-    """Deterministic k-means in RGB, seeded by farthest-point picks from the most common color."""
-    counts = {}
-    for p in pixels:
-        counts[p] = counts.get(p, 0) + 1
-    distinct = sorted(counts, key=lambda c: (-counts[c], c))
-    centers = [distinct[0]]
-    while len(centers) < min(k, len(distinct)):
-        centers.append(max(distinct, key=lambda c: min(sum((a - b) ** 2 for a, b in zip(c, m)) for m in centers)))
-    for _ in range(20):
-        sums = [[0, 0, 0, 0] for _ in centers]
-        for c, n in counts.items():
-            s = sums[nearest(centers, c)]
-            for i in range(3):
-                s[i] += c[i] * n
-            s[3] += n
-        centers = [tuple(round(s[i] / s[3]) for i in range(3)) if s[3] else centers[j] for j, s in enumerate(sums)]
-    return centers
-
-
-# Color grade for the lamp screen (raycaster, things). Lamps show a dark frame around each lit
-# square, so Freedoom's dark palette came out murky: lift the brightest channel with a gamma curve
-# (scaling all three, so hue holds and nothing clips) and saturate a little, before storing 4 bits
-# per channel. Constants only: no combinator cost. Build parameters: raycast.Shading, --gamma and
-# --saturation.
-DEFAULT_GAMMA = 0.5
-DEFAULT_SATURATION = 1.25
-
-
-def grade(rgb, gamma=DEFAULT_GAMMA, saturation=DEFAULT_SATURATION):
-    v = max(rgb)
-    if v <= 0:
-        return tuple(rgb)
-    luma = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
-    sat = [max(0.0, luma + (x - luma) * saturation) for x in rgb]
-    k = 255 * (v / 255) ** gamma / max(sat)
-    return tuple(min(255, round(x * k)) for x in sat)
-
-
-def c4(rgb, gamma=DEFAULT_GAMMA, saturation=DEFAULT_SATURATION):
-    """A graded color at 4 bits per channel (times a brightness <= 17 on the screen)."""
-    return tuple(min(15, round(x / 17)) for x in grade(rgb, gamma, saturation))
-
-
-def pack(rgb):
-    v = (rgb[0] << 16) | (rgb[1] << 8) | rgb[2]
-    return v or 0x010101   # packed 0 would make the lamp fall back to its default color
 
 
 def background(y, h):
@@ -432,11 +381,11 @@ def verify(path, meta, words, ticks):
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--size", default="160x100")
+    ap = argparse.ArgumentParser(description="Generate the walking-sprite demo.")
+    ap.add_argument("--size", default="160x100", help="screen size in lamps, WxH")
     ap.add_argument("--sprite", default="TROO")
     ap.add_argument("--ticks", type=int, default=PERIOD + 60)
-    ap.add_argument("--verify", action="store_true")
+    ap.add_argument("--verify", action="store_true", help="simulate in fsim and check every frame")
     quality_arg(ap)
     a = ap.parse_args()
     w, h = map(int, a.size.lower().split("x"))

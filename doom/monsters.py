@@ -1,5 +1,4 @@
-"""Monsters that wake, chase and attack (M4, 2026-11-03, user request: before this they stood still
-and hurt you on contact, every 40 ticks, so the fist was useless). Doom's behaviour, simplified:
+"""Monsters that wake, chase and attack: Doom's behaviour, simplified.
 
     asleep   until the player is in sight in front of it (or within a tile), or it gets shot
     chase    walk toward the player, stopping a little way off: along the axis it is further off on
@@ -7,8 +6,7 @@ and hurt you on contact, every 40 ticks, so the fist was useless). Doom's behavi
              the major axis, it steps sideways off that corner first (Doom tries other directions);
              one full walk cycle after waking, an attack or a flinch, then an attack attempt at
              each of Doom's A_Chase calls, with Doom's chance by distance (P_CheckMissileRange), and
-             none beyond 5 tiles (user request 2026-11-04: Doom's attack from anywhere in sight, which
-             hurt from across the room the moment the game started)
+             none beyond 5 tiles (Doom attacks from anywhere in sight)
     attack   Doom's attack frames; at the shot frame, if the player is still in sight: the imp
              scratches within a tile (always hits) or throws a fireball (hits half the time: there
              are no projectiles yet), the zombieman fires (hit chance from Doom's spread)
@@ -54,12 +52,12 @@ import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
-sys.path.insert(0, str(HERE.parent / "conformance"))
 sys.path.insert(0, str(HERE))
-from bp import sig  # noqa: E402
+from compiler.bp import sig  # noqa: E402
 from compiler import semantics as sem  # noqa: E402
 from compiler.netlist import EACH, GREEN, LANE_SIGNALS, RED  # noqa: E402
 import combat as cb  # noqa: E402
+import maps  # noqa: E402
 import touch as tc  # noqa: E402
 import weapons as wp  # noqa: E402
 
@@ -123,9 +121,9 @@ TYPES = {
              "attack": [("POSSE1", 10), ("POSSF1", 8), ("POSSE1", 8)], "fire": 10, "damage": 9, "speed": 2,
              "melee": False, "chance": [1.0, 1.0, 0.5, 0.3, 0.0], "hit": [0.64, 0.38, 0.24, 0.15, 0.1]},
 }
-# Which way each monster faces (thing index -> unit vector): it notices the player in that half
-# plane (Doom: 180 degrees), or within a tile. Our placement.
-FACING = {0: (0, 1), 1: (0, -1), 2: (1, 0), 3: (-1, 0)}
+# Which way each monster on the current map faces (thing index -> unit vector, maps.select): it
+# notices the player in that half plane (Doom: 180 degrees), or within a tile.
+FACING = dict(maps.ARENA["facing"])
 
 
 def walk_len(t):

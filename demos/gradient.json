@@ -9776,6 +9776,6 @@
  },
  "fsim": {
   "ticks": 80,
-  "doc": "A 16x16 lamp screen showing an animated diagonal gradient, laid out like the planned Doom row\nstage: one wire network per row whose lanes are the screen columns, a shared clock broadcast on\ngreen, three east-facing arithmetic combinators per row, then the lamps.\n\n  row y lanes:  v_x = x + y            (constant combinator, one signal per column)\n  stage 1:      Each(red) + T(green)   (T is only on green, so it isn't a lane)\n  stage 2:      Each % 16\n  stage 3:      Each * 17 * 0x010101   (gray level -> packed RGB)"
+  "doc": "A 16x16 lamp screen showing an animated diagonal gradient, laid out like an early row\nstage: one wire network per row whose lanes are the screen columns, a shared clock broadcast on\ngreen, three east-facing arithmetic combinators per row, then the lamps.\n\n  row y lanes:  v_x = x + y            (constant combinator, one signal per column)\n  stage 1:      Each(red) + T(green)   (T is only on green, so it isn't a lane)\n  stage 2:      Each % 16\n  stage 3:      Each * 17 * 0x010101   (gray level -> packed RGB)"
  }
 }

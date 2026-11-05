@@ -5,12 +5,11 @@ A map is 16 x 16 cells (raycast.K grid lines per axis; the flats' tile lookup ke
 axis). A cell is a wall (a key of `walls`: its texture) or open (a key of `flats`: its floor and
 ceiling flats). Open cells must be closed in by walls.
 
-  arena   the first map (M1-M4): pillars and a central block.
-  test    the arena with its monsters where they stood until 2026-11-04 (two of them a few tiles from
-          the spawn): game.py's scripted walk and fight were tuned on it, so verify with --map test.
-  acid    the showcase (2026-11-04, user request): a start room, a wooden tunnel north into a hall
-          over acid, a brown walkway zigzagging across it to an exit corridor. Inspired by a classic
-          first level's nukage room, laid out our own way on the grid.
+  arena   the default: pillars and a central block, monsters 5 to 9 tiles from the spawn.
+  test    the arena with two monsters a few tiles from the spawn: game.py's scripted walk and fight
+          are tuned on it, so verify with --map test.
+  acid    a start room, a wooden tunnel north into a hall over acid, and a brown walkway zigzagging
+          across it to an exit corridor.
 """
 import sys
 
@@ -35,9 +34,8 @@ B...B......B...B
 """.split(),
     "walls": {"#": "STARTAN3", "B": "BRICK7", "M": "MARBLE1", "R": "SP_HOT1"},
     "flats": {".": ("FLOOR4_8", "TLITE6_4")},
-    # (x, y) in tiles and the sprite frame: monsters first, then items (things.py).
-    # Monsters 5 to 9 tiles from the spawn (user request 2026-11-04: two stood 2-3 tiles off), the
-    # side ones behind the brick pillars.
+    # (x, y) in tiles and the sprite frame: monsters first, then items (things.py). The side
+    # monsters stand behind the brick pillars.
     "things": [
         (5.5, 4.5, "TROOA1"),
         (10.5, 7.5, "POSSA1"),
@@ -55,9 +53,9 @@ B...B......B...B
     "center": (8, 7.5),     # raycast.py's scripted camera circles this
 }
 
-# The showcase. Walls: # STARTAN3 (start room), W WOOD1 (tunnel), G TEKGREN2 (north wall, exit
+# Walls: # STARTAN3 (start room), W WOOD1 (tunnel), G TEKGREN2 (north wall, exit
 # corridor), N BROWNGRN (the hall's sides). Open: . grey hex floor (start room, tunnel), b the brown
-# walkway, ~ acid; one dark ceiling over all (the tunnel's low ceiling comes with ceiling heights).
+# walkway, ~ acid; one dark ceiling over all.
 ACID = {
     "rows": """
 GGGGGGGGGGGGGGGG

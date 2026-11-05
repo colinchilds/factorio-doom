@@ -1,4 +1,4 @@
-"""The status bar face's expressions (2026-11-03, user request): Doom's ST_updateFaceWidget.
+"""The status bar face's expressions: Doom's ST_updateFaceWidget.
 
 Doom picks one of 42 faces: a pain level from health (5 levels: hud.face_ranges) times 8
 expressions, plus god mode and dead. Each tic, in priority order (a face of higher priority keeps
@@ -42,9 +42,8 @@ import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
-sys.path.insert(0, str(HERE.parent / "conformance"))
 sys.path.insert(0, str(HERE))
-from bp import sig  # noqa: E402
+from compiler.bp import sig  # noqa: E402
 from compiler import semantics as sem  # noqa: E402
 from compiler.netlist import EACH, GREEN, RED  # noqa: E402
 import monsters as mo  # noqa: E402

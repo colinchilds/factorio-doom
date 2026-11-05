@@ -1,7 +1,7 @@
-"""The game (M2 movement, M3 textured walls): the raycaster driven by the input pad. Walk with
-the D-pad, turn, slide along walls.
+"""The game: the raycaster driven by the input pad, with the player's state, weapons, monsters and
+the status bar.
 
-    screen (W x H lamps) | pad (demos/input_pad.py) | player logic below the pad
+    screen (W x H lamps) | pad (doom/input_pad.py) | player logic below the pad
 
 Player state is one register, REG: a decider `RESTART = 0 -> Everything` that adds its own output
 (green loop) to the increments on its red input, and drops it all on a restart (Use pressed while
@@ -23,7 +23,7 @@ path waits for collision; from REG, every tick, whatever is held (lat = 2 ticks 
     two ticks after HELD, walking or turning.
 
 REG also holds the status bar's numbers as offsets from a new game's (hud.START): HEALTH, ARMOR
-and the four ammo counts. For now only the weapons change them (ammo); shooting comes later.
+and the four ammo counts.
 
 The state bus is REG's red output network. Besides REG it carries the weapon state (weapons.py),
 held by deciders that read the bus and write back onto it, one tick per step:
@@ -32,7 +32,7 @@ held by deciders that read the bus and write back onto it, one tick per step:
     W, A, P  the weapon, its animation tick and the pending weapon (weapons.logic)
     spend    per weapon, at its shots' ticks: ammo -cost into REG (as an increment)
 
-Monsters (monsters.py, 2026-11-03) keep their positions on the bus and their working signals
+Monsters (monsters.py) keep their positions on the bus and their working signals
 (offsets, sight lines, random numbers, flags, the damage queue) on a network of their own, M,
 around a pole below the turn deciders: their deciders read the bus on red and M on green. The
 status bar face's expression (face.py) is on the bus too, its counters on M, and the raycaster puts
@@ -41,11 +41,11 @@ each monster's bearing (left, right or ahead) on the bus next to the aim.
 Music (music.py, optional: `--music FILE`, a MIDItorio blueprint of the player's): the song's
 clock reads RESTART on the bus, so a new game starts it over, and it loops at the song's end.
 
-The raycaster (demos/raycast.py build_graph) takes its camera from the bus through a relay line
-over the top of the screen to a pole left of it (its ext input). The status bar (demos/hud.py)
+The raycaster (doom/raycast.py build_graph) takes its camera from the bus, carried by the row of
+substations through the top of the screen to its port left of it (an ext input). The status bar (doom/hud.py)
 reads the same port, adding hud.START on the wire, and the weapon picture comes from W and A.
 
-    python3 demos/game.py --size 64x40 --verify   # register vs reference, frames vs evaluation
+    python3 doom/game.py --size 64x40 --verify   # register vs reference, frames vs evaluation
 """
 import argparse
 import json
@@ -57,10 +57,10 @@ import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent
+DEFAULT_MUSIC = ROOT / "music" / "level1.txt"
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "conformance"))
 sys.path.insert(0, str(HERE))
-from bp import DEFAULT_SUBSTATION_QUALITY, Blueprint, encode, quality_arg, sig  # noqa: E402
+from compiler.bp import DEFAULT_SUBSTATION_QUALITY, Blueprint, encode, quality_arg, sig  # noqa: E402
 from compiler import netlist  # noqa: E402
 from compiler import semantics as sem  # noqa: E402
 from compiler.netlist import EACH, GREEN, RED, Collect, Graph, Node, Scalar  # noqa: E402
@@ -74,7 +74,7 @@ import music  # noqa: E402
 import raycast  # noqa: E402
 import touch as tc  # noqa: E402
 import weapons as wp  # noqa: E402
-from raycast import FP, trig  # noqa: E402
+from raycast import FP  # noqa: E402
 
 RED_IN, GREEN_IN, RED_OUT, GREEN_OUT = 1, 2, 3, 4
 SX, SY, SR = sig("signal-X"), sig("signal-Y"), sig("signal-R")
@@ -94,8 +94,7 @@ A0 = 192           # spawn facing north (angle 0 is east, angles grow clockwise 
 SPEED = 10         # 1/FP tiles per tick while walking: 2.3 tiles a second
 ANGLE_SUB = 2      # R counts 2^ANGLE_SUB steps per view angle: 1024 per revolution
 # Turning (R steps per tick): slow for the first RAMP ticks a turn button is held, so a tap (the
-# pad holds a button 14 ticks) turns 14 steps, about 5 degrees, then fast: a turn in 4.3 s. User
-# requests: 8 a tick was too stiff (2026-11-01), then 3 still too coarse to aim (2026-11-02). Doom
+# pad holds a button 14 ticks) turns 14 steps, about 5 degrees, then fast: a turn in 4.3 s. Doom
 # also turns slowly for its first few tics.
 DEFAULT_TURN = (1, 4, 18)   # (slow, fast, ramp ticks)
 AMASK = (256 << ANGLE_SUB) - 1
@@ -262,7 +261,7 @@ def player_graph(reg, reg_pos, held, held_pos, gate_pos, turn_pos, box, turn_rat
             for b, d in ((input_pad.RIGHT, 1), (input_pad.LEFT, -1)) for k, r in enumerate((slow, fast))]
     for i, n in enumerate(turn):
         n.fixed, n.pos = True, (turn_pos[0], turn_pos[1] + i)
-    X, Y, R = g.scalar(S, SX), g.scalar(S, SY), g.scalar(S, SR)
+    R = g.scalar(S, SR)
     V = {fw: [g.lookup_scalar(R, {a: velocity(a % TURN, fw)[i] for a in range(*angle_range(turn_rate))}, 32, f"v{fw:+d} {'xy'[i]}", out=s)
               for i, s in enumerate((SX, SY))] for fw in (1, -1)}
     # Corner (sx, sy) of the box is in a wall: X + SPAWN + sx*box in [256 x0, 256 (x1 + 1)) and the
@@ -1169,7 +1168,7 @@ def verify(path, b, pad, g, nodes, gr, cols, rows, layout, w, h, inserts, ticks,
     # Plus frames lit by a muzzle flash (weapons.light), both levels.
     lv = lambda t: wp.light(ref_bus[t].get(sem.key(WEAPON), 0), ref_bus[t].get(sem.key(ANIM), 0))  # noqa: E731
     lit = {k: [t for t in range(lag + 2, ticks) if lv(t - lag) == k] for k in (1, 2)}
-    for k, ts in lit.items():
+    for ts in lit.values():
         sample += ts[::max(1, len(ts) // 6)][:6]
     # Plus two frames showing each face expression.
     fe_at = lambda t: ref_bus[t].get(sem.key(fc.FE), 0)  # noqa: E731
@@ -1189,12 +1188,12 @@ def verify(path, b, pad, g, nodes, gr, cols, rows, layout, w, h, inserts, ticks,
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--size", default="160x100")
-    ap.add_argument("--button-size", type=int)
-    ap.add_argument("--hold", type=int, default=input_pad.DEFAULT_HOLD)
-    ap.add_argument("--ticks", type=int, default=2560)
-    ap.add_argument("--verify", action="store_true")
+    ap = argparse.ArgumentParser(description="Generate the game's blueprint (doom/gen/game_WxH.txt).")
+    ap.add_argument("--size", default="160x100", help="screen size in lamps, WxH")
+    ap.add_argument("--button-size", type=int, help="chests per pad button side (default from --size)")
+    ap.add_argument("--hold", type=int, default=input_pad.DEFAULT_HOLD, help="ticks a button stays held after a drop")
+    ap.add_argument("--ticks", type=int, default=2560, help="ticks to simulate with --verify")
+    ap.add_argument("--verify", action="store_true", help="simulate a scripted game in fsim and check it")
     ap.add_argument("--keys", action="store_true",
                     help="script the input as the keyboard mod (mod/doom-input) instead of pad drops")
     ap.add_argument("--tex", type=int, default=raycast.DEFAULT_TEX, help="texture resolution (texels per tile)")
@@ -1207,8 +1206,10 @@ def main():
                     help=f"turn speed once held a while: 1/{1 << ANGLE_SUB} view angles (1/{256 << ANGLE_SUB} turn) per tick")
     ap.add_argument("--turn-slow", type=int, default=DEFAULT_TURN[0], help="turn speed while a button is first held")
     ap.add_argument("--turn-ramp", type=int, default=DEFAULT_TURN[2], help="ticks held before turning speeds up")
-    ap.add_argument("--music", help="a MIDItorio blueprint string (file): the song loops, and starts over on a "
-                                    "new game (music.py)")
+    ap.add_argument("--music", default=str(DEFAULT_MUSIC.relative_to(ROOT)),
+                    help="a MIDItorio blueprint string (file): the song loops, and starts over on a new game "
+                         "(music.py; default: %(default)s)")
+    ap.add_argument("--no-music", action="store_true", help="leave out the music")
     quality_arg(ap)
     raycast.shading_args(ap)
     raycast.view_args(ap)
@@ -1224,13 +1225,13 @@ def main():
     b, pad, g, nodes, gr, cols, rows, scal, layout, lat, probe = build(
         w, h, a.button_size, a.hold, a.substation_quality, a.tex, a.flat, things,
         turn, raycast.Shading.from_args(a), not a.no_hud, not a.no_weapon, view=raycast.View.from_args(a),
-        song=music.Song(pathlib.Path(a.music).read_text()) if a.music else None)
+        song=None if a.no_music else music.Song((ROOT / a.music).read_text()))
     inserts = schedule(pad, a.ticks, keys=a.keys)
     data = b.to_json()
-    data["fsim"] = {"ticks": a.ticks, "doc": f"M4 {w}x{h}", "inserts": inserts}
+    data["fsim"] = {"ticks": a.ticks, "doc": f"game {w}x{h}", "inserts": inserts}
     gen = HERE / "gen"
     gen.mkdir(exist_ok=True)
-    path = gen / f"game_{w}x{h}{'' if a.map == maps.DEFAULT else '_' + a.map}.json"
+    path = gen / f"game_{w}x{h}{maps.suffix()}.json"
     path.write_text(json.dumps(data, separators=(",", ":")))
     path.with_suffix(".txt").write_text(encode(b.to_json()) + "\n")
     counts = {}

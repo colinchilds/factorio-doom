@@ -1,5 +1,5 @@
-"""M4 shooting (2026-11-02, user request): hitscan along the middle of the view, monster health, and
-Freedoom's pain and death animations.
+"""Shooting: hitscan along the middle of the view, monster health, and Freedoom's pain and death
+animations.
 
 Aim (in the raycaster, raycast.build_graph's `aim` hook; it already has every thing's depth and
 lateral offset, and the wall distance per column):
@@ -15,10 +15,9 @@ Monster state (bus, per thing index, held by deciders reading the bus like the w
     DMG_i    damage taken. At a weapon's shot ticks (the same A values and ammo checks as its spend
              decider), AIM = i + 1 (and CLOSE for the fist) and alive -> DMG_i += the weapon's
              damage (Doom's mean; no randomness, no spread: every shotgun pellet hits).
-    MS_i     its clock, run by monsters.py since 2026-11-03 (before: here, pain only from
-             standing): 1..PL pain (any hit that doesn't kill), DEATH.. dying (the tick after DMG_i
-             reaches the monster's health), then the corpse frame at CORPSE, held; walking and
-             attacking above. Doom's state durations (info.c), tics converted to ticks.
+    MS_i     its clock, run by monsters.py: 1..PL pain (any hit that doesn't kill), DEATH.. dying
+             (the tick after DMG_i reaches the monster's health), then the corpse frame at CORPSE,
+             held; walking and attacking above. Doom's state durations (info.c), tics converted to ticks.
 The raycaster shows frame(MS_i): a lookup on the port added to the standing frame's id
 (things.column_stage `frame`). Dead monsters stop attacking and stop being solid (monsters.py,
 game.player_graph).
@@ -30,9 +29,8 @@ import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
-sys.path.insert(0, str(HERE.parent / "conformance"))
 sys.path.insert(0, str(HERE))
-from bp import sig  # noqa: E402
+from compiler.bp import sig  # noqa: E402
 from compiler import semantics as sem  # noqa: E402
 from compiler.netlist import EACH, RED  # noqa: E402
 import touch as tc  # noqa: E402

@@ -9,7 +9,7 @@
   python3 harness/run.py --lanes                       # signals safe to use as lanes, with/without DLC
   python3 harness/run.py --poles                       # pole supply area and reach per quality (DLC)
 
-Uses an isolated config and mod directory under harness/, so the user's saves and mods are
+Uses an isolated config and mod directory under harness/, so your own saves and mods are
 never touched. Set FACTORIO to override the binary path.
 """
 
@@ -25,8 +25,8 @@ import time
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent
-sys.path.insert(0, str(ROOT / "conformance"))
-from bp import encode  # noqa: E402
+sys.path.insert(0, str(ROOT))
+from compiler.bp import encode  # noqa: E402
 
 DEFAULT_BIN = pathlib.Path.home() / "Library/Application Support/Steam/steamapps/common/Factorio/factorio.app/Contents/MacOS/factorio"
 INSTANCE = HERE / "instance"
@@ -49,7 +49,16 @@ def write_cases(cases, warmup, mode="run", every=1):
     (MODS / "fsim-harness" / "cases.lua").write_text("\n".join(lines) + "\n")
 
 
+def write_config():
+    """The instance's config: its own write-data directory, no update checks or crash uploads."""
+    DATA.mkdir(parents=True, exist_ok=True)
+    (INSTANCE / "config.ini").write_text(
+        "[path]\nread-data=__PATH__system-read-data__\nwrite-data=" + str(DATA) + "\n\n"
+        "[general]\nlocale=en\n\n[other]\ncheck-updates=false\nenable-crash-log-uploading=false\n")
+
+
 def factorio(binary, *args):
+    write_config()
     cmd = [str(binary), "-c", str(INSTANCE / "config.ini"), "--mod-directory", str(MODS), "--disable-audio", *args]
     res = subprocess.run(cmd, capture_output=True, text=True)
     log = res.stdout + res.stderr

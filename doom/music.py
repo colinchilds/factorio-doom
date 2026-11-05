@@ -24,7 +24,7 @@ Everything else in the song's blueprint is kept as it is.
 The song comes from a file of the player's (`game.py --music FILE`: any MIDItorio blueprint string),
 not from the repository: only original or freely licensed content goes there.
 
-`python3 demos/music.py FILE --verify` builds the song with a stand-in bus (RESTART on a constant
+`python3 doom/music.py FILE --verify` builds the song with a stand-in bus (RESTART on a constant
 combinator, scripted) and checks every speaker decider, every tick, against the song's events.
 `--loop TICKS` shortens the loop, so a game run (harness/run.py --dlc) can cover it.
 """
@@ -38,8 +38,7 @@ import sys
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "conformance"))
-from bp import GREEN_IN, GREEN_OUT, RED_IN, Blueprint, decode, encode, quality_arg, sig  # noqa: E402
+from compiler.bp import GREEN_IN, GREEN_OUT, RED_IN, Blueprint, decode, encode, quality_arg, sig  # noqa: E402
 from compiler import semantics as sem  # noqa: E402
 from compiler.netlist import GREEN, RED  # noqa: E402
 
@@ -139,7 +138,7 @@ class Song:
         # Per speaker its decider (address on red, note on green), and the arithmetic combinators
         # unpacking the events onto those two networks.
         self.channels = []   # (decider, address, red arith, green arith)
-        for a, ca, b, cb in self.wires:
+        for a, _, b, _ in self.wires:
             for d, s in ((a, b), (b, a)):
                 if kind(d) == "decider-combinator" and kind(s) == "programmable-speaker":
                     feed = [[E[n]["control_behavior"]["arithmetic_conditions"] for n, c in self.members(d, cin)
@@ -218,11 +217,11 @@ SWITCH = [(900, 0), (1000, 1)]
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description="Build a MIDItorio song with the game's looping clock.")
     ap.add_argument("song", help="a MIDItorio blueprint string (file)")
     ap.add_argument("--loop", type=int, help="loop after this many ticks (default: the song's length)")
     ap.add_argument("--ticks", type=int, help="ticks to check (default: two loops and a bit)")
-    ap.add_argument("--verify", action="store_true")
+    ap.add_argument("--verify", action="store_true", help="simulate in fsim and check every speaker decider")
     quality_arg(ap)
     a = ap.parse_args()
     song = Song(pathlib.Path(a.song).read_text())
