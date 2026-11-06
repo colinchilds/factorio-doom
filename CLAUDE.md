@@ -38,6 +38,14 @@ harness check them.
 4. Refactors that shouldn't change the circuit: compare the generated `.json` byte for byte before
    and after.
 
+**Before every commit, refresh `blueprints/`** with the default settings, check them in the game
+and update the table in `blueprints/README.md` (entities, ms/tick):
+
+```sh
+for s in 64x40 160x100 320x200; do python3 doom/game.py --size $s && cp doom/gen/game_$s.txt blueprints/doom_$s.txt; done
+python3 harness/run.py --dlc --bench 30 doom/gen/game_64x40.json doom/gen/game_160x100.json doom/gen/game_320x200.json
+```
+
 Build fsim first: `cargo build --release && cargo test --release`. The harness starts its own
 isolated Factorio instance (`harness/instance/`); it never touches other saves or mods.
 

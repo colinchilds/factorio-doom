@@ -20,12 +20,15 @@ Art comes from [Freedoom](https://freedoom.github.io/) (BSD). The maps are origi
 
 ## Quick start
 
+Ready-made blueprint strings are in [`blueprints/`](blueprints/) (64×40, 160×100 and 320×200). To
+build your own:
+
 ```sh
 python3 doom/game.py --size 160x100     # writes doom/gen/game_160x100.txt
 ```
 
-1. Copy the contents of `doom/gen/game_160x100.txt` and import it as a blueprint in a Space Age game
-   (the map editor, `/editor`, is easiest).
+1. Copy the blueprint string and import it as a blueprint in a Space Age game (the map editor,
+   `/editor`, is easiest).
 2. Place it and connect one power source to any of its substations; the blueprint wires its own
    power network.
 3. Play from the input pad right of the screen: with an item in hand, hover over a button and drop
@@ -98,6 +101,7 @@ what's next.
 
 | Path | |
 |---|---|
+| `blueprints/` | Ready-made blueprint strings at three sizes |
 | `doom/` | The game's generators: `game.py` (entry point), `raycast.py` (renderer), `things.py`, `monsters.py`, `combat.py`, `weapons.py`, `touch.py`, `hud.py`, `face.py`, `input_pad.py`, `music.py`, `maps.py` |
 | `compiler/` | Netlist compiler (`netlist.py`: latency balancing, placement, wiring, evaluation), combinator semantics, blueprint builder (`bp.py`) |
 | `crates/fsim/` | Tick-accurate circuit simulator (Rust) |
